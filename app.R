@@ -257,18 +257,18 @@ server <- function(input, output, session) {
   mutate_steps <- reactiveVal(list())
   # Determine whether we are using demo data
   is_demo <- reactive({ is.null(input$file$datapath) })
-
+  
   valueBox <- function(title, value) {
     div(class = 'card text-center mb-3', div(class = 'card-body', h5(class = 'card-title', title), h3(class = 'card-text', value)))
   }
-
+  
   # Update sheet picker when a file is uploaded
   observe({
     if (is_demo()) {
       updateSelectInput(session, "sheet", choices = "Sample", selected = "Sample")
     }
   })
-
+  
   observeEvent(input$file, {
     req(input$file$datapath)
     sheets <- tryCatch(excel_sheets(input$file$datapath), error = function(e) NULL)
@@ -278,7 +278,7 @@ server <- function(input, output, session) {
       updateSelectInput(session, "sheet", choices = sheets, selected = sheets[1])
     }
   }, ignoreNULL = FALSE)
-
+  
   output$sheet_picker <- renderUI({
     if (is_demo()) {
       selectInput("sheet", "Sheet", choices = "Sample", selected = "Sample")
@@ -288,7 +288,7 @@ server <- function(input, output, session) {
       selectInput("sheet", "Sheet", choices = sheets, selected = sheets[1])
     }
   })
-
+  
   output$secondary_sheet_picker <- renderUI({
     file <- input$secondary_file
     if (is.null(file)) return(NULL)
@@ -301,7 +301,7 @@ server <- function(input, output, session) {
     if (is.null(sheets) || length(sheets) == 0) return(NULL)
     selectInput("secondary_sheet", "Sheet", choices = sheets, selected = sheets[1])
   })
-
+  
   # Build the raw data reactive -------------------------------------------
   data_raw <- reactive({
     if (is_demo()) {
@@ -332,7 +332,7 @@ server <- function(input, output, session) {
     }
     df
   })
-
+  
   data_secondary_raw <- reactive({
     file <- input$secondary_file
     if (is.null(file)) return(NULL)
@@ -378,13 +378,13 @@ server <- function(input, output, session) {
     }
     df
   })
-
+  
   data_secondary_transformed <- reactive({
     df <- data_secondary_raw()
     if (is.null(df)) return(NULL)
     df
   })
-
+  
   table_choices <- reactive({
     choices <- c("Primary (transformed)" = "primary_transformed", "Primary (raw)" = "primary_raw")
     if (!is.null(data_secondary_raw())) {
@@ -395,7 +395,7 @@ server <- function(input, output, session) {
     }
     choices
   })
-
+  
   join_table_data <- function(code) {
     switch(
       code,
@@ -406,7 +406,7 @@ server <- function(input, output, session) {
       NULL
     )
   }
-
+  
   observe({
     choices <- table_choices()
     if (is.null(choices) || length(choices) == 0) return()
@@ -418,7 +418,7 @@ server <- function(input, output, session) {
     updateSelectInput(session, "join_left_table", choices = choices, selected = left_selected)
     updateSelectInput(session, "join_right_table", choices = choices, selected = right_selected)
   })
-
+  
   output$join_key_inputs <- renderUI({
     left_df <- join_table_data(input$join_left_table)
     right_df <- join_table_data(input$join_right_table)
@@ -441,7 +441,7 @@ server <- function(input, output, session) {
       selectizeInput("join_key_right", "Right key(s)", choices = choices_right, selected = selected_right, multiple = TRUE, options = list(placeholder = "Select join keys"))
     )
   })
-
+  
   data_joined <- reactive({
     left_code <- input$join_left_table
     right_code <- input$join_right_table
@@ -474,13 +474,13 @@ server <- function(input, output, session) {
       NULL
     })
   })
-
+  
   output$join_preview <- renderDT({
     df <- data_joined()
     validate(need(!is.null(df), "Configure join inputs to view preview."))
     datatable(df, options = list(scrollX = TRUE, pageLength = 10))
   })
-
+  
   dataset_source_choices <- reactive({
     choices <- c("Transformed" = "transformed")
     joined <- data_joined()
@@ -489,7 +489,7 @@ server <- function(input, output, session) {
     }
     choices
   })
-
+  
   resolve_dataset <- function(source) {
     if (identical(source, "joined")) {
       joined <- data_joined()
@@ -499,7 +499,7 @@ server <- function(input, output, session) {
       data_transformed()
     }
   }
-
+  
   # Diagnostics ------------------------------------------------------------
   ingest_summary_tbl <- reactive({
     df <- data_raw()
@@ -508,9 +508,9 @@ server <- function(input, output, session) {
       value = c(nrow(df), ncol(df))
     )
   })
-
+  
   output$ingest_summary <- renderTable({ ingest_summary_tbl() })
-
+  
   missing_summary_tbl <- reactive({
     df <- data_raw()
     tibble(
@@ -519,18 +519,18 @@ server <- function(input, output, session) {
       pct_missing = map_dbl(df, ~ mean(is.na(.)) * 100)
     )
   })
-
+  
   output$missing_summary <- renderTable({ missing_summary_tbl() })
-
+  
   # Filter builder UI ------------------------------------------------------
   observeEvent(input$add_filter, {
     filter_count(filter_count() + 1)
   })
-
+  
   observeEvent(input$remove_filter, {
     filter_count(max(1, filter_count() - 1))
   })
-
+  
   output$filter_builder <- renderUI({
     req(data_raw())
     cols <- names(data_raw())
@@ -545,7 +545,7 @@ server <- function(input, output, session) {
       })
     )
   })
-
+  
   # Select & rename --------------------------------------------------------
   rename_mapping <- reactive({
     cols <- input$selected_cols
@@ -558,25 +558,25 @@ server <- function(input, output, session) {
     })
     tibble(original = cols, renamed = rename_vals)
   })
-
+  
   rename_lookup <- reactive({
     mapping <- rename_mapping()
     setNames(mapping$renamed, mapping$original)
   })
-
+  
   output$select_columns <- renderUI({
     cols <- names(data_raw())
     req(length(cols) > 0)
     checkboxGroupInput("selected_cols", "Columns to keep", choices = cols, selected = cols)
   })
-
+  
   output$rename_ui <- renderUI({
     req(input$selected_cols)
     tagList(lapply(input$selected_cols, function(col) {
       textInput(paste0("rename_", col), label = paste0("Rename ", col, " to"), value = col)
     }))
   })
-
+  
   # Mutate helpers ---------------------------------------------------------
   mutate_param_inputs <- reactive({
     df <- data_raw()
@@ -586,87 +586,87 @@ server <- function(input, output, session) {
     string_cols <- cols[vapply(df, function(x) is.character(x) || is.factor(x), logical(1))]
     list(cols = cols, numeric = numeric_cols, date = date_cols, string = string_cols, categorical = string_cols)
   })
-
+  
   output$mutate_params <- renderUI({
     params <- mutate_param_inputs()
     helper <- req(input$mutate_helper)
     switch(helper,
-      arithmetic = tagList(
-        textInput("mutate_new", "New column name"),
-        selectInput("mutate_col_a", "Column A", choices = params$numeric),
-        selectInput("mutate_arith_op", "Operator", choices = c("+", "-", "*", "/")),
-        selectInput("mutate_col_b", "Column B", choices = params$numeric)
-      ),
-      log = tagList(
-        textInput("mutate_new", "New column name"),
-        selectInput("mutate_col_a", "Column", choices = params$numeric),
-        radioButtons("mutate_log_base", "Base", choices = c("Natural" = "e", "Base 10" = "10"), inline = TRUE)
-      ),
-      zscore = tagList(
-        textInput("mutate_new", "New column name"),
-        selectInput("mutate_col_a", "Column", choices = params$numeric)
-      ),
-      minmax = tagList(
-        textInput("mutate_new", "New column name"),
-        selectInput("mutate_col_a", "Column", choices = params$numeric)
-      ),
-      parsedate = tagList(
-        textInput("mutate_new", "New column name"),
-        selectInput("mutate_col_a", "Column", choices = params$cols),
-        textInput("mutate_format", "Date format (lubridate::parse_date_time)", value = "ymd")
-      ),
-      stringcase = tagList(
-        textInput("mutate_new", "New column name"),
-        selectInput("mutate_col_a", "Column", choices = params$cols),
-        selectInput("mutate_case", "Transform", choices = string_case_opts)
-      ),
-      winsor = tagList(
-        textInput("mutate_new", "New column name"),
-        selectInput("mutate_col_a", "Column", choices = params$numeric),
-        sliderInput("mutate_winsor", "Percentile", min = 0, max = 20, value = 5)
-      ),
-      dateparts = {
-        date_choices <- if (length(params$date) > 0) params$date else params$cols
-        tagList(
-          selectInput("mutate_col_a", "Date column", choices = date_choices),
-          textInput("mutate_date_prefix", "Prefix for new columns", value = if (length(date_choices) > 0) paste0(date_choices[1], "_") else "date_"),
-          checkboxGroupInput("mutate_date_parts", "Parts to extract", choices = c("Year" = "year", "Quarter" = "quarter", "Month" = "month", "Week" = "week", "Weekday" = "wday"), selected = c("year", "month"))
-        )
-      },
-      stringextract = {
-        str_choices <- if (length(params$string) > 0) params$string else params$cols
-        tagList(
-          textInput("mutate_new", "New column name"),
-          selectInput("mutate_col_a", "Text column", choices = str_choices),
-          radioButtons("mutate_extract_mode", "Mode", choices = c("Split" = "split", "Regex" = "regex"), inline = TRUE),
-          textInput("mutate_pattern", "Separator or pattern"),
-          textInput("mutate_regex_group", "Regex group (optional)")
-        )
-      },
-      factorlump = {
-        cat_choices <- if (length(params$categorical) > 0) params$categorical else params$cols
-        tagList(
-          textInput("mutate_new", "New column name"),
-          selectInput("mutate_col_a", "Categorical column", choices = cat_choices),
-          numericInput("mutate_lump_n", "Keep top N", value = 5, min = 1, step = 1)
-        )
-      },
-      impute = tagList(
-        textInput("mutate_new", "New column name"),
-        selectInput("mutate_col_a", "Column", choices = params$cols),
-        selectInput("mutate_impute_method", "Strategy", choices = c("Mean" = "mean", "Median" = "median", "Mode" = "mode", "Constant" = "constant")),
-        conditionalPanel(
-          condition = "input.mutate_impute_method == 'constant'",
-          textInput("mutate_impute_constant", "Constant value")
-        ),
-        checkboxInput("mutate_impute_flag", "Create _is_imputed flag", value = FALSE)
-      )
+           arithmetic = tagList(
+             textInput("mutate_new", "New column name"),
+             selectInput("mutate_col_a", "Column A", choices = params$numeric),
+             selectInput("mutate_arith_op", "Operator", choices = c("+", "-", "*", "/")),
+             selectInput("mutate_col_b", "Column B", choices = params$numeric)
+           ),
+           log = tagList(
+             textInput("mutate_new", "New column name"),
+             selectInput("mutate_col_a", "Column", choices = params$numeric),
+             radioButtons("mutate_log_base", "Base", choices = c("Natural" = "e", "Base 10" = "10"), inline = TRUE)
+           ),
+           zscore = tagList(
+             textInput("mutate_new", "New column name"),
+             selectInput("mutate_col_a", "Column", choices = params$numeric)
+           ),
+           minmax = tagList(
+             textInput("mutate_new", "New column name"),
+             selectInput("mutate_col_a", "Column", choices = params$numeric)
+           ),
+           parsedate = tagList(
+             textInput("mutate_new", "New column name"),
+             selectInput("mutate_col_a", "Column", choices = params$cols),
+             textInput("mutate_format", "Date format (lubridate::parse_date_time)", value = "ymd")
+           ),
+           stringcase = tagList(
+             textInput("mutate_new", "New column name"),
+             selectInput("mutate_col_a", "Column", choices = params$cols),
+             selectInput("mutate_case", "Transform", choices = string_case_opts)
+           ),
+           winsor = tagList(
+             textInput("mutate_new", "New column name"),
+             selectInput("mutate_col_a", "Column", choices = params$numeric),
+             sliderInput("mutate_winsor", "Percentile", min = 0, max = 20, value = 5)
+           ),
+           dateparts = {
+             date_choices <- if (length(params$date) > 0) params$date else params$cols
+             tagList(
+               selectInput("mutate_col_a", "Date column", choices = date_choices),
+               textInput("mutate_date_prefix", "Prefix for new columns", value = if (length(date_choices) > 0) paste0(date_choices[1], "_") else "date_"),
+               checkboxGroupInput("mutate_date_parts", "Parts to extract", choices = c("Year" = "year", "Quarter" = "quarter", "Month" = "month", "Week" = "week", "Weekday" = "wday"), selected = c("year", "month"))
+             )
+           },
+           stringextract = {
+             str_choices <- if (length(params$string) > 0) params$string else params$cols
+             tagList(
+               textInput("mutate_new", "New column name"),
+               selectInput("mutate_col_a", "Text column", choices = str_choices),
+               radioButtons("mutate_extract_mode", "Mode", choices = c("Split" = "split", "Regex" = "regex"), inline = TRUE),
+               textInput("mutate_pattern", "Separator or pattern"),
+               textInput("mutate_regex_group", "Regex group (optional)")
+             )
+           },
+           factorlump = {
+             cat_choices <- if (length(params$categorical) > 0) params$categorical else params$cols
+             tagList(
+               textInput("mutate_new", "New column name"),
+               selectInput("mutate_col_a", "Categorical column", choices = cat_choices),
+               numericInput("mutate_lump_n", "Keep top N", value = 5, min = 1, step = 1)
+             )
+           },
+           impute = tagList(
+             textInput("mutate_new", "New column name"),
+             selectInput("mutate_col_a", "Column", choices = params$cols),
+             selectInput("mutate_impute_method", "Strategy", choices = c("Mean" = "mean", "Median" = "median", "Mode" = "mode", "Constant" = "constant")),
+             conditionalPanel(
+               condition = "input.mutate_impute_method == 'constant'",
+               textInput("mutate_impute_constant", "Constant value")
+             ),
+             checkboxInput("mutate_impute_flag", "Create _is_imputed flag", value = FALSE)
+           )
     )
   })
-
+  
   output$mutate_params_2 <- renderUI({ NULL })
   output$mutate_params_extra <- renderUI({ NULL })
-
+  
   observeEvent(input$add_mutate, {
     helper <- req(input$mutate_helper)
     params <- list(type = helper)
@@ -733,7 +733,7 @@ server <- function(input, output, session) {
     current[[paste0("step_", length(current) + 1)]] <- params
     mutate_steps(current)
   })
-
+  
   observeEvent(input$remove_mutate, {
     req(length(mutate_steps()) > 0)
     idx <- as.integer(input$mutate_remove)
@@ -743,7 +743,7 @@ server <- function(input, output, session) {
       mutate_steps(current)
     }
   })
-
+  
   output$mutate_list <- renderUI({
     steps <- mutate_steps()
     if (length(steps) == 0) return(p('No transformations added yet.'))
@@ -756,7 +756,7 @@ server <- function(input, output, session) {
       actionButton('remove_mutate', 'Remove selected', class = 'btn btn-sm btn-danger')
     )
   })
-
+  
   # Group summarise UI -----------------------------------------------------
   output$group_summarise <- renderUI({
     df <- data_raw()
@@ -769,7 +769,7 @@ server <- function(input, output, session) {
       checkboxGroupInput("summary_fns", "Summary functions", choices = summary_funcs, selected = c("mean", "median"))
     )
   })
-
+  
   # Pivot UI ---------------------------------------------------------------
   output$pivot_controls <- renderUI({
     df <- data_raw()
@@ -788,8 +788,8 @@ server <- function(input, output, session) {
       )
     )
   })
-
-
+  
+  
   # Transformation pipeline ------------------------------------------------
   current_filters <- reactive({
     n <- filter_count()
@@ -804,7 +804,7 @@ server <- function(input, output, session) {
     }
     filters
   })
-
+  
   apply_filter <- function(df, flt) {
     col <- flt$column
     op <- flt$operator
@@ -817,32 +817,32 @@ server <- function(input, output, session) {
           num_val <- suppressWarnings(as.numeric(val))
           if (is.na(num_val)) stop('numeric required')
           keep <- switch(op,
-            '==' = vec == num_val,
-            '!=' = vec != num_val,
-            '>' = vec > num_val,
-            '>=' = vec >= num_val,
-            '<' = vec < num_val,
-            '<=' = vec <= num_val
+                         '==' = vec == num_val,
+                         '!=' = vec != num_val,
+                         '>' = vec > num_val,
+                         '>=' = vec >= num_val,
+                         '<' = vec < num_val,
+                         '<=' = vec <= num_val
           )
         } else if (inherits(vec, c('Date', 'POSIXct', 'POSIXt'))) {
           parsed <- suppressWarnings(lubridate::ymd(val))
           if (is.na(parsed)) stop('date required')
           keep <- switch(op,
-            '==' = vec == parsed,
-            '!=' = vec != parsed,
-            '>' = vec > parsed,
-            '>=' = vec >= parsed,
-            '<' = vec < parsed,
-            '<=' = vec <= parsed
+                         '==' = vec == parsed,
+                         '!=' = vec != parsed,
+                         '>' = vec > parsed,
+                         '>=' = vec >= parsed,
+                         '<' = vec < parsed,
+                         '<=' = vec <= parsed
           )
         } else {
           keep <- switch(op,
-            '==' = vec == val,
-            '!=' = vec != val,
-            '>' = vec > val,
-            '>=' = vec >= val,
-            '<' = vec < val,
-            '<=' = vec <= val
+                         '==' = vec == val,
+                         '!=' = vec != val,
+                         '>' = vec > val,
+                         '>=' = vec >= val,
+                         '<' = vec < val,
+                         '<=' = vec <= val
           )
         }
         df <- df[which(keep | is.na(keep)), , drop = FALSE]
@@ -866,7 +866,7 @@ server <- function(input, output, session) {
       df
     })
   }
-
+  
   filter_code <- function(flt) {
     col <- flt$column
     op <- flt$operator
@@ -882,7 +882,7 @@ server <- function(input, output, session) {
       glue::glue("|> dplyr::filter(.data[['{col}']] {op} '{val}')")
     }
   }
-
+  
   apply_mutate_step <- function(df, step, lookup = NULL) {
     col <- step$col_a
     new_col <- step$new
@@ -919,11 +919,11 @@ server <- function(input, output, session) {
       df <- df %>% mutate(!!new_col := {
         val <- as.character(.data[[col]])
         switch(step$case,
-          lower = stringr::str_to_lower(val),
-          upper = stringr::str_to_upper(val),
-          title = stringr::str_to_title(val),
-          trim = stringr::str_trim(val),
-          val
+               lower = stringr::str_to_lower(val),
+               upper = stringr::str_to_upper(val),
+               title = stringr::str_to_title(val),
+               trim = stringr::str_trim(val),
+               val
         )
       })
     } else if (step$type == "winsor") {
@@ -1015,7 +1015,7 @@ server <- function(input, output, session) {
     }
     df
   }
-
+  
   mutate_code <- function(step, lookup = NULL) {
     resolve <- function(name) {
       if (!is.null(lookup) && length(lookup) > 0 && name %in% names(lookup)) lookup[[name]] else name
@@ -1047,12 +1047,12 @@ server <- function(input, output, session) {
       prefix <- step$new %||% paste0(col, "_")
       part_expr <- purrr::map_chr(parts, function(part) {
         expr <- switch(part,
-          year = "lubridate::year(.data[['{col}']])",
-          quarter = "lubridate::quarter(.data[['{col}']])",
-          month = "lubridate::month(.data[['{col}']])",
-          week = "lubridate::isoweek(.data[['{col}']])",
-          wday = "lubridate::wday(.data[['{col}']], label = TRUE, abbr = TRUE)",
-          "NA"
+                       year = "lubridate::year(.data[['{col}']])",
+                       quarter = "lubridate::quarter(.data[['{col}']])",
+                       month = "lubridate::month(.data[['{col}']])",
+                       week = "lubridate::isoweek(.data[['{col}']])",
+                       wday = "lubridate::wday(.data[['{col}']], label = TRUE, abbr = TRUE)",
+                       "NA"
         )
         glue::glue("{prefix}{part} = {expr}")
       })
@@ -1101,7 +1101,7 @@ server <- function(input, output, session) {
       NULL
     }
   }
-
+  
   # Pipeline application ---------------------------------------------------
   data_transformed <- reactive({
     df <- data_raw()
@@ -1186,7 +1186,7 @@ server <- function(input, output, session) {
     }
     df
   })
-
+  
   # Pipeline code ----------------------------------------------------------
   pipeline_code <- reactive({
     code <- c("data_raw()")
@@ -1265,9 +1265,9 @@ server <- function(input, output, session) {
     }
     paste(c("data_tr <-", code), collapse = "\n")
   })
-
+  
   output$pipeline_code <- renderText({ pipeline_code() })
-
+  
   export_pipeline_state <- function() {
     list(
       filters = current_filters(),
@@ -1287,7 +1287,7 @@ server <- function(input, output, session) {
       drop_outliers = isTRUE(input$drop_outliers)
     )
   }
-
+  
   import_pipeline_state <- function(state) {
     if (is.null(state) || !is.list(state)) return()
     filters <- state$filters
@@ -1306,12 +1306,12 @@ server <- function(input, output, session) {
         updateTextInput(session, "filter_val_1", value = "")
       }
     }, once = TRUE)
-
+    
     if (!is.null(state$selected_cols)) {
       cols <- intersect(state$selected_cols, names(data_raw()))
       updateCheckboxGroupInput(session, "selected_cols", selected = cols)
     }
-
+    
     if (!is.null(state$rename_mapping)) {
       mapping <- as.data.frame(state$rename_mapping, stringsAsFactors = FALSE)
       session$onFlushed(function() {
@@ -1325,12 +1325,12 @@ server <- function(input, output, session) {
         }
       }, once = TRUE)
     }
-
+    
     mutate_steps(state$mutate_steps %||% list())
     updateSelectizeInput(session, "group_vars", selected = intersect(state$group_vars %||% character(0), names(data_raw())))
     updateSelectizeInput(session, "summary_cols", selected = intersect(state$summary_cols %||% character(0), names(data_raw())))
     updateCheckboxGroupInput(session, "summary_fns", selected = intersect(state$summary_fns %||% character(0), summary_funcs))
-
+    
     if (!is.null(state$pivot)) {
       updateRadioButtons(session, "pivot_mode", selected = state$pivot$mode %||% "none")
       session$onFlushed(function() {
@@ -1340,18 +1340,18 @@ server <- function(input, output, session) {
         if (!is.null(state$pivot$wider_values)) updateSelectInput(session, "pivot_wider_values", selected = state$pivot$wider_values)
       }, once = TRUE)
     }
-
+    
     updateCheckboxInput(session, "drop_outliers", value = isTRUE(state$drop_outliers))
     showNotification("Pipeline state imported.", type = "message")
   }
-
+  
   observe({
     json_txt <- jsonlite::toJSON(export_pipeline_state(), auto_unbox = TRUE, pretty = TRUE)
     if (!is.null(input$pipeline_state_json)) {
       updateTextAreaInput(session, "pipeline_state_json", value = json_txt)
     }
   })
-
+  
   observeEvent(input$pipeline_state_upload, {
     file <- input$pipeline_state_upload
     req(file$datapath)
@@ -1361,12 +1361,12 @@ server <- function(input, output, session) {
     })
     if (!is.null(state)) import_pipeline_state(state)
   })
-
+  
   # Data preview -----------------------------------------------------------
   output$data_preview <- renderDT({
     datatable(data_transformed(), filter = "top", options = list(scrollX = TRUE, pageLength = 10))
   })
-
+  
   # Downloads --------------------------------------------------------------
   output$download_csv <- downloadHandler(
     filename = function() paste0("raw_data_", Sys.Date(), ".csv"),
@@ -1374,28 +1374,28 @@ server <- function(input, output, session) {
       write.csv(data_raw(), file, row.names = FALSE)
     }
   )
-
+  
   output$download_xlsx <- downloadHandler(
     filename = function() paste0("raw_data_", Sys.Date(), ".xlsx"),
     content = function(file) {
       write_xlsx(data_raw(), file)
     }
   )
-
+  
   output$download_tr_csv <- downloadHandler(
     filename = function() paste0("transformed_", Sys.Date(), ".csv"),
     content = function(file) {
       write.csv(data_transformed(), file, row.names = FALSE)
     }
   )
-
+  
   output$download_tr_xlsx <- downloadHandler(
     filename = function() paste0("transformed_", Sys.Date(), ".xlsx"),
     content = function(file) {
       write_xlsx(data_transformed(), file)
     }
   )
-
+  
   output$download_script <- downloadHandler(
     filename = function() "pipeline.R",
     content = function(file) {
@@ -1403,7 +1403,7 @@ server <- function(input, output, session) {
       writeLines(code, file)
     }
   )
-
+  
   # Overview tab ----------------------------------------------------------
   output$summary_cards <- renderUI({
     df <- data_transformed()
@@ -1418,7 +1418,7 @@ server <- function(input, output, session) {
       valueBox("# Categorical", cat_cols)
     )
   })
-
+  
   output$missing_bar <- renderPlot({
     df <- data_raw()
     req(ncol(df) > 0)
@@ -1430,7 +1430,7 @@ server <- function(input, output, session) {
       scale_fill_gradient(low = "#56B1F7", high = "#132B43") +
       theme_minimal()
   })
-
+  
   data_dictionary_tbl <- reactive({
     df <- data_raw()
     preview_vals <- map_chr(df, function(x) {
@@ -1444,12 +1444,12 @@ server <- function(input, output, session) {
       examples = preview_vals
     )
   })
-
+  
   output$data_dictionary <- renderDT({
     dict <- data_dictionary_tbl()
     datatable(dict %>% mutate(pct_missing = sprintf("%.1f%%", pct_missing)), options = list(pageLength = 10))
   })
-
+  
   output$download_dictionary <- downloadHandler(
     filename = function() paste0("data_dictionary_", Sys.Date(), ".csv"),
     content = function(file) {
@@ -1457,7 +1457,7 @@ server <- function(input, output, session) {
       write.csv(dict, file, row.names = FALSE)
     }
   )
-
+  
   output$download_report <- downloadHandler(
     filename = function() paste0("eda_report_", Sys.Date(), ".html"),
     content = function(file) {
@@ -1478,13 +1478,13 @@ server <- function(input, output, session) {
       }
     }
   )
-
+  
   # Distributions tab ------------------------------------------------------
   dist_data <- reactive({
     source <- input$dist_data_source %||% "transformed"
     resolve_dataset(source)
   })
-
+  
   output$dist_controls <- renderUI({
     df <- dist_data()
     req(ncol(df) > 0)
@@ -1498,7 +1498,7 @@ server <- function(input, output, session) {
       selectInput("dist_var", "Variable", choices = names(df))
     )
   })
-
+  
   output$dist_outputs <- renderUI({
     req(input$dist_var)
     if (is_demo()) {
@@ -1521,7 +1521,7 @@ server <- function(input, output, session) {
       }
     }
   })
-
+  
   output$hist_plot <- renderPlot({
     req(input$dist_var)
     df <- dist_data()
@@ -1533,7 +1533,7 @@ server <- function(input, output, session) {
       labs(title = paste("Distribution of", var), x = var, y = "Density") +
       theme_minimal()
   })
-
+  
   output$box_plot <- renderPlot({
     req(input$dist_var)
     df <- dist_data()
@@ -1544,7 +1544,7 @@ server <- function(input, output, session) {
       labs(title = paste("Boxplot of", var), y = var) +
       theme_minimal()
   })
-
+  
   output$numeric_stats <- renderTable({
     req(input$dist_var)
     df <- dist_data()
@@ -1559,7 +1559,7 @@ server <- function(input, output, session) {
                 min(x, na.rm = TRUE), max(x, na.rm = TRUE), skew, quantile(x, 0.25, na.rm = TRUE), quantile(x, 0.75, na.rm = TRUE))
     )
   })
-
+  
   output$bar_plot <- renderPlot({
     req(input$dist_var)
     df <- dist_data()
@@ -1573,7 +1573,7 @@ server <- function(input, output, session) {
       labs(title = paste("Top", top_k, var), x = var, y = "Count") +
       theme_minimal()
   })
-
+  
   output$cat_stats <- renderTable({
     req(input$dist_var)
     df <- data_transformed()
@@ -1582,13 +1582,13 @@ server <- function(input, output, session) {
     counts <- df %>% count(.data[[var]], name = "count") %>% mutate(prop = count / sum(count)) %>% arrange(desc(count))
     head(counts, input$top_k %||% 10)
   })
-
+  
   # Relationships tab ------------------------------------------------------
   rel_data <- reactive({
     source <- input$rel_data_source %||% "transformed"
     resolve_dataset(source)
   })
-
+  
   output$rel_controls <- renderUI({
     df <- rel_data()
     numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
@@ -1614,7 +1614,7 @@ server <- function(input, output, session) {
       )
     )
   })
-
+  
   output$rel_outputs <- renderUI({
     if (is_demo()) {
       wellPanel("Upload your own data to explore relationships.")
@@ -1626,7 +1626,7 @@ server <- function(input, output, session) {
       )
     }
   })
-
+  
   output$scatter_plot <- renderPlot({
     req(input$rel_x, input$rel_y)
     df <- rel_data()
@@ -1640,7 +1640,7 @@ server <- function(input, output, session) {
       theme_minimal() +
       labs(title = paste("Scatter:", input$rel_x, "vs", input$rel_y))
   })
-
+  
   output$scatter_stats <- renderText({
     req(input$rel_x, input$rel_y)
     df <- rel_data()
@@ -1650,7 +1650,7 @@ server <- function(input, output, session) {
     if (is.null(ctest)) return("Unable to compute correlation.")
     sprintf("%s correlation: %.3f (p = %.3f)", str_to_title(method), ctest$estimate, ctest$p.value)
   })
-
+  
   output$group_summary_plot <- renderPlot({
     req(input$rel_group_num, input$rel_group_cat)
     df <- rel_data()
@@ -1671,18 +1671,18 @@ server <- function(input, output, session) {
       labs(title = paste("Grouped means of", input$rel_group_num), x = input$rel_group_cat, y = "Mean ± 95% CI") +
       theme_minimal()
   })
-
+  
   # Correlation tab -------------------------------------------------------
   corr_data <- reactive({
     source <- input$corr_data_source %||% "transformed"
     resolve_dataset(source)
   })
-
+  
   output$corr_controls <- renderUI({
     df <- corr_data()
     numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
     if (length(numeric_cols) < 2) {
-      return(wellPanel("Select a dataset with at least two numeric columns."))
+      return(wellPanel("Select a dataset with at least two numeric columns."));
     }
     choices <- dataset_source_choices()
     selected_source <- input$corr_data_source
@@ -1693,7 +1693,7 @@ server <- function(input, output, session) {
       selectizeInput("corr_cols", "Columns", choices = numeric_cols, multiple = TRUE, selected = numeric_cols)
     )
   })
-
+  
   corr_matrix <- reactive({
     cols <- input$corr_cols
     df <- corr_data()
@@ -1701,7 +1701,7 @@ server <- function(input, output, session) {
     mat <- df %>% select(all_of(cols)) %>% mutate(across(everything(), as.numeric))
     cor(mat, use = "pairwise.complete.obs", method = input$corr_method %||% "pearson")
   })
-
+  
   output$corr_outputs <- renderUI({
     if (is_demo()) {
       wellPanel("Upload a dataset to calculate correlations.")
@@ -1713,7 +1713,7 @@ server <- function(input, output, session) {
       )
     }
   })
-
+  
   output$corr_heatmap <- renderPlot({
     mat <- corr_matrix()
     df <- as.data.frame(as.table(mat))
@@ -1724,13 +1724,13 @@ server <- function(input, output, session) {
       labs(x = NULL, y = NULL, title = paste(str_to_title(input$corr_method), "correlation")) +
       theme_minimal()
   })
-
+  
   # --- Target EDA tab ----------------------------------------------------
   target_data <- reactive({
     source <- input$target_data_source %||% "transformed"
     resolve_dataset(source)
   })
-
+  
   observeEvent(input$target_column, {
     df <- target_data()
     col <- input$target_column
@@ -1738,11 +1738,11 @@ server <- function(input, output, session) {
     auto_type <- if (is.numeric(df[[col]])) "numeric" else "categorical"
     updateSelectInput(session, "target_type", selected = auto_type)
   }, ignoreNULL = TRUE)
-
+  
   output$target_controls <- renderUI({
     df <- target_data()
     if (is.null(df) || ncol(df) == 0) {
-      return(wellPanel("Select a dataset with columns to analyse."))
+      return(wellPanel("Select a dataset with columns to analyse."));
     }
     choices <- dataset_source_choices()
     selected_source <- input$target_data_source
@@ -1770,7 +1770,7 @@ server <- function(input, output, session) {
       )
     )
   })
-
+  
   target_correlation_tbl <- reactive({
     df <- target_data()
     target <- input$target_column
@@ -1785,19 +1785,19 @@ server <- function(input, output, session) {
       correlation = map_dbl(others, ~ suppressWarnings(cor(df[[target]], df[[.x]], use = "pairwise.complete.obs")))
     ) %>% filter(!is.na(correlation)) %>% arrange(desc(abs(correlation)))
   })
-
+  
   output$target_outputs <- renderUI({
     df <- target_data()
     target <- input$target_column
     type <- input$target_type %||% "numeric"
     if (is.null(df) || is.null(target) || !target %in% names(df)) {
-      return(wellPanel("Select a valid target column."))
+      return(wellPanel("Select a valid target column."));
     }
     if (type == "numeric" && !is.numeric(df[[target]])) {
-      return(wellPanel("Target is not numeric; switch to categorical analysis."))
+      return(wellPanel("Target is not numeric; switch to categorical analysis."));
     }
     if (type == "categorical" && is.numeric(df[[target]])) {
-      return(wellPanel("Target is numeric; switch to numeric analysis."))
+      return(wellPanel("Target is numeric; switch to numeric analysis."));
     }
     if (type == "numeric") {
       tagList(
@@ -1814,13 +1814,13 @@ server <- function(input, output, session) {
       )
     }
   })
-
+  
   output$target_correlation <- renderTable({
     tbl <- target_correlation_tbl()
     if (nrow(tbl) == 0) return(tibble(message = "No numeric correlations available."))
     tbl
   })
-
+  
   output$target_numeric_plot <- renderPlot({
     df <- target_data()
     target <- req(input$target_column)
@@ -1840,7 +1840,7 @@ server <- function(input, output, session) {
         theme_minimal()
     }
   })
-
+  
   output$target_class_plot <- renderPlot({
     df <- target_data()
     target <- req(input$target_column)
@@ -1851,14 +1851,14 @@ server <- function(input, output, session) {
       labs(x = target, y = "Count", title = paste("Class distribution for", target)) +
       theme_minimal()
   })
-
+  
   output$target_numeric_plots <- renderUI({
     df <- target_data()
     target <- input$target_column
     req(!is.null(df), !is.null(target), target %in% names(df))
     cols <- input$target_numeric_cols
     if (is.null(cols) || length(cols) == 0) {
-      return(wellPanel("Select numeric columns to compare means."))
+      return(wellPanel("Select numeric columns to compare means."));
     }
     tagList(lapply(seq_along(cols), function(i) {
       col <- cols[[i]]
@@ -1888,13 +1888,13 @@ server <- function(input, output, session) {
       plotOutput(output_id, height = "300px")
     }))
   })
-
+  
   # --- Time Series tab ---------------------------------------------------
   time_series_data <- reactive({
     source <- input$time_data_source %||% "transformed"
     resolve_dataset(source)
   })
-
+  
   output$time_series_controls <- renderUI({
     df <- time_series_data()
     if (is.null(df) || ncol(df) == 0) {
@@ -1925,7 +1925,7 @@ server <- function(input, output, session) {
       selectInput("time_period", "Aggregation", choices = c("Day" = "day", "Week" = "week", "Month" = "month", "Quarter" = "quarter", "Year" = "year"), selected = input$time_period %||% "month")
     )
   })
-
+  
   time_series_agg <- reactive({
     df <- time_series_data()
     date_col <- input$time_date_col
@@ -1948,7 +1948,7 @@ server <- function(input, output, session) {
     seq_full <- seq(min(agg$.period), max(agg$.period), by = period)
     tibble(.period = seq_full) %>% left_join(agg, by = ".period") %>% mutate(period_date = as.Date(.period))
   })
-
+  
   output$time_series_outputs <- renderUI({
     agg <- time_series_agg()
     if (nrow(agg) == 0) {
@@ -1959,7 +1959,7 @@ server <- function(input, output, session) {
       tableOutput("time_series_table")
     )
   })
-
+  
   output$time_series_plot <- renderPlot({
     agg <- time_series_agg()
     validate(need(nrow(agg) > 0, "No time series data to plot."))
@@ -1969,13 +1969,13 @@ server <- function(input, output, session) {
       labs(x = NULL, y = input$time_measure_col %||% "Value", title = paste("Aggregated", input$time_measure_col %||% "value", "by", str_to_title(input$time_period %||% "month"))) +
       theme_minimal()
   })
-
+  
   output$time_series_table <- renderTable({
     agg <- time_series_agg()
     if (nrow(agg) == 0) return(tibble())
     agg %>% select(period = period_date, value = measure)
-  })
-
+  }, digits = NULL)
+  
   output$download_corr_png <- downloadHandler(
     filename = function() paste0("correlation_heatmap_", Sys.Date(), ".png"),
     content = function(file) {
@@ -1989,14 +1989,14 @@ server <- function(input, output, session) {
       ggsave(file, plt, width = 6, height = 5)
     }
   )
-
+  
   output$download_corr_csv <- downloadHandler(
     filename = function() paste0("correlation_matrix_", Sys.Date(), ".csv"),
     content = function(file) {
       write.csv(corr_matrix(), file, row.names = TRUE)
     }
   )
-
+  
   # Quality tab -----------------------------------------------------------
   duplicate_rows <- reactive({
     df <- data_transformed()
@@ -2005,13 +2005,13 @@ server <- function(input, output, session) {
     if (!any(dup_idx)) return(tibble())
     tibble(row = which(dup_idx)) %>% bind_cols(df[dup_idx, , drop = FALSE])
   })
-
+  
   duplicates_summary_tbl <- reactive({
     rows <- duplicate_rows()
     if (nrow(rows) == 0) return(tibble())
     rows %>% select(-row) %>% group_by(across(everything())) %>% summarise(count = dplyr::n(), .groups = "drop") %>% arrange(desc(count))
   })
-
+  
   near_zero_tbl <- reactive({
     df <- data_transformed()
     if (nrow(df) == 0) return(tibble())
@@ -2021,7 +2021,7 @@ server <- function(input, output, session) {
       ratio = ifelse(rows == 0, 0, unique_values / rows)
     ) %>% filter(ratio <= 0.01)
   })
-
+  
   type_conflicts_tbl <- reactive({
     df <- data_transformed()
     tibble(column = names(df)) %>% mutate(
@@ -2034,7 +2034,7 @@ server <- function(input, output, session) {
       })
     ) %>% filter(non_numeric_values > 0)
   })
-
+  
   co_missing_tbl <- reactive({
     df <- data_transformed()
     if (ncol(df) < 2 || nrow(df) == 0) return(tibble())
@@ -2046,7 +2046,7 @@ server <- function(input, output, session) {
       co_missing = map_int(combos, ~ sum(miss[, .x[1]] & miss[, .x[2]], na.rm = TRUE))
     ) %>% mutate(pct_rows = ifelse(nrow(df) == 0, 0, co_missing / nrow(df))) %>% arrange(desc(co_missing)) %>% slice_head(n = 10)
   })
-
+  
   quality_report_tbl <- reactive({
     pieces <- list(
       missingness = missing_summary_tbl(),
@@ -2060,7 +2060,7 @@ server <- function(input, output, session) {
       tibble(section = nm) %>% bind_cols(tbl)
     })
   })
-
+  
   output$quality_outputs <- renderUI({
     df <- data_transformed()
     num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
@@ -2096,35 +2096,35 @@ server <- function(input, output, session) {
       downloadButton('download_quality_report', 'Download quality report')
     )
   })
-
+  
   output$quality_missing <- renderTable({
     missing_summary_tbl() %>% mutate(pct_missing = sprintf("%.1f%%", pct_missing))
   })
-
+  
   output$co_missing_table <- renderTable({
     tbl <- co_missing_tbl()
     if (nrow(tbl) == 0) return(tibble(message = 'No co-missingness detected.'))
     tbl %>% mutate(pct_rows = scales::percent(pct_rows))
   })
-
+  
   output$duplicates_table <- renderTable({
     tbl <- duplicates_summary_tbl()
     if (nrow(tbl) == 0) return(tibble(message = 'No duplicate rows found.'))
     tbl
   })
-
+  
   output$near_zero_table <- renderTable({
     tbl <- near_zero_tbl()
     if (nrow(tbl) == 0) return(tibble(message = 'No near-zero variance columns detected.'))
     tbl %>% mutate(ratio = scales::percent(ratio))
   })
-
+  
   output$type_conflicts_table <- renderTable({
     tbl <- type_conflicts_tbl()
     if (nrow(tbl) == 0) return(tibble(message = 'No type conflicts detected.'))
     tbl
   })
-
+  
   output$download_duplicates <- downloadHandler(
     filename = function() paste0("duplicates_", Sys.Date(), ".csv"),
     content = function(file) {
@@ -2136,7 +2136,7 @@ server <- function(input, output, session) {
       }
     }
   )
-
+  
   output$download_quality_report <- downloadHandler(
     filename = function() paste0("quality_report_", Sys.Date(), ".csv"),
     content = function(file) {
@@ -2148,7 +2148,7 @@ server <- function(input, output, session) {
       }
     }
   )
-
+  
   output$missing_map <- renderPlot({
     req(!is_demo())
     df <- data_transformed() %>% head(100)
@@ -2167,4 +2167,3 @@ server <- function(input, output, session) {
 }
 
 shinyApp(ui, server)
-
