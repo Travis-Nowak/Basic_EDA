@@ -1075,19 +1075,28 @@ server <- function(input, output, session) {
       glue::glue("dplyr::mutate({new_col} = forcats::fct_lump_n(as.factor(.data[['{col}']]), n = {n}))")
     } else if (step$type == "impute") {
       method <- step$method %||% "mean"
-      fill_expr <- switch(method,
-        mean = glue::glue("mean(.data[['{col}']], na.rm = TRUE)"),
+      fill_expr <- switch(
+        method,
+        mean   = glue::glue("mean(.data[['{col}']], na.rm = TRUE)"),
         median = glue::glue("stats::median(.data[['{col}']], na.rm = TRUE)"),
-        mode = glue::glue("names(sort(table(.data[['{col}']]), decreasing = TRUE))[1]"),
+        mode   = glue::glue("names(sort(table(.data[['{col}']]), decreasing = TRUE))[1]"),
         constant = {
           const <- step$constant %||% ""
           num_const <- suppressWarnings(as.numeric(const))
-          if (!is.na(num_const)) as.character(num_const) else glue::glue("'{stringr::str_replace_all(const, "'", "\\\\'")}'")
+          if (!is.na(num_const)) {
+            # numeric constant – just return the number text
+            as.character(num_const)
+          } else {
+            # text constant – escape single quotes, then wrap in single quotes
+            const_escaped <- stringr::str_replace_all(const, "'", "\\\\'")
+            paste0("'", const_escaped, "'")
+          }
         },
         "NA"
       )
       flag_code <- if (isTRUE(step$flag)) glue::glue(", {new_col}_is_imputed = is.na(.data[['{col}']])") else ""
       glue::glue("dplyr::mutate({new_col} = ifelse(is.na(.data[['{col}']]), {fill_expr}, .data[['{col}']]){flag_code})")
+      
     } else {
       NULL
     }
