@@ -102,6 +102,7 @@ ui <- page_sidebar(
     checkboxInput("trim_ws", "Trim whitespace", value = TRUE),
     checkboxInput("clean_names", "Clean column names", value = TRUE),
     checkboxInput("guess_types", "Guess column types", value = TRUE),
+    checkboxInput("use_sample", "Profile on sample (max 10000 rows)", value = FALSE),
     hr(),
     strong("Ingest diagnostics"),
     tableOutput("ingest_summary"),
@@ -153,6 +154,9 @@ ui <- page_sidebar(
           h4("Select & Rename"),
           uiOutput("select_columns"),
           uiOutput("rename_ui"),
+          hr(),
+          h4("Column types"),
+          uiOutput("type_editor"),
           hr(),
           h4("Mutate helpers"),
           fluidRow(
@@ -255,6 +259,7 @@ server <- function(input, output, session) {
   # Track added filters and mutate steps
   filter_count <- reactiveVal(1)
   mutate_steps <- reactiveVal(list())
+  type_overrides <- reactiveVal(list())
   # Determine whether we are using demo data
   is_demo <- reactive({ is.null(input$file$datapath) })
   
@@ -557,6 +562,70 @@ server <- function(input, output, session) {
       if (is.null(val) || val == '') col else val
     })
     tibble(original = cols, renamed = rename_vals)
+  })
+
+  # --- Column type editor -------------------------------------------------
+  output$type_editor <- renderUI({
+    df <- data_transformed()
+    if (ncol(df) == 0) {
+      return(wellPanel("No columns available."))
+    }
+    cols <- names(df)
+    overrides <- type_overrides()
+    selected_col <- input$type_override_col
+    if (is.null(selected_col) || !selected_col %in% cols) {
+      selected_col <- cols[1]
+    }
+    current_type <- overrides[[selected_col]] %||% "Keep as is"
+    tagList(
+      fluidRow(
+        column(6, selectInput("type_override_col", "Column", choices = cols, selected = selected_col)),
+        column(6, selectInput("type_override_type", "Target type", choices = c("Keep as is", "numeric", "character", "factor", "date"), selected = current_type))
+      ),
+      tableOutput("type_overrides_table")
+    )
+  })
+
+  observeEvent(input$type_override_col, {
+    overrides <- type_overrides()
+    col <- input$type_override_col
+    if (is.null(col)) return()
+    current <- overrides[[col]] %||% "Keep as is"
+    updateSelectInput(session, "type_override_type", selected = current)
+  }, ignoreNULL = TRUE)
+
+  observeEvent(input$type_override_type, {
+    col <- input$type_override_col
+    req(col)
+    type <- input$type_override_type
+    overrides <- type_overrides()
+    if (is.null(type) || identical(type, "Keep as is")) {
+      if (!is.null(overrides[[col]])) {
+        overrides[[col]] <- NULL
+        type_overrides(overrides)
+      }
+    } else {
+      overrides[[col]] <- type
+      type_overrides(overrides)
+    }
+  }, ignoreNULL = TRUE)
+
+  output$type_overrides_table <- renderTable({
+    overrides <- type_overrides()
+    if (length(overrides) == 0) {
+      return(tibble(message = "No overrides set."))
+    }
+    tibble(column = names(overrides), target_type = unname(unlist(overrides)))
+  })
+
+  observe({
+    df <- data_transformed()
+    overrides <- type_overrides()
+    if (length(overrides) == 0) return()
+    keep <- overrides[names(overrides) %in% names(df)]
+    if (length(keep) != length(overrides)) {
+      type_overrides(keep)
+    }
   })
   
   rename_lookup <- reactive({
@@ -1128,6 +1197,39 @@ server <- function(input, output, session) {
         df <- apply_mutate_step(df, step, lookup)
       }
     }
+    # --- Column type editor ---
+    overrides <- type_overrides()
+    if (length(overrides) > 0) {
+      for (col in names(overrides)) {
+        if (!col %in% names(df)) next
+        target <- overrides[[col]]
+        if (is.null(target) || identical(target, "Keep as is")) next
+        vec <- df[[col]]
+        if (identical(target, "numeric")) {
+          df[[col]] <- suppressWarnings(as.numeric(vec))
+        } else if (identical(target, "character")) {
+          df[[col]] <- as.character(vec)
+        } else if (identical(target, "factor")) {
+          df[[col]] <- as.factor(vec)
+        } else if (identical(target, "date")) {
+          converted <- suppressWarnings({
+            if (is.numeric(vec)) {
+              tryCatch(as.Date(vec, origin = "1970-01-01"), error = function(e) rep(as.Date(NA), length(vec)))
+            } else {
+              as.Date(vec)
+            }
+          })
+          if (is.character(vec)) {
+            if (all(is.na(converted) & !is.na(vec))) {
+              converted <- suppressWarnings(lubridate::ymd(vec))
+            }
+          }
+          if (!(all(is.na(converted)) && any(!is.na(vec)))) {
+            df[[col]] <- converted
+          }
+        }
+      }
+    }
     # Group & summarise
     if (!is.null(input$summary_cols) && length(input$summary_cols) > 0 && !is.null(input$summary_fns) && length(input$summary_fns) > 0) {
       summary_cols <- lookup[input$summary_cols]
@@ -1183,6 +1285,15 @@ server <- function(input, output, session) {
         upper <- stats[2] + 1.5 * iqr
         df <- df %>% filter(is.na(.data[[col]]) | (.data[[col]] >= lower & .data[[col]] <= upper))
       }
+    }
+    df
+  })
+
+  # --- Sampling helper ----------------------------------------------------
+  data_for_profile <- reactive({
+    df <- data_transformed()
+    if (isTRUE(input$use_sample) && nrow(df) > 10000) {
+      df <- dplyr::slice_head(df, n = 10000)
     }
     df
   })
@@ -1420,9 +1531,12 @@ server <- function(input, output, session) {
   })
   
   output$missing_bar <- renderPlot({
-    df <- data_raw()
+    df <- data_for_profile()
     req(ncol(df) > 0)
-    miss <- missing_summary_tbl()
+    miss <- tibble(
+      column = names(df),
+      pct_missing = map_dbl(df, ~ mean(is.na(.)) * 100)
+    )
     ggplot(miss, aes(x = forcats::fct_reorder(column, pct_missing), y = pct_missing, fill = pct_missing)) +
       geom_col() +
       coord_flip() +
@@ -1482,7 +1596,11 @@ server <- function(input, output, session) {
   # Distributions tab ------------------------------------------------------
   dist_data <- reactive({
     source <- input$dist_data_source %||% "transformed"
-    resolve_dataset(source)
+    if (identical(source, "transformed")) {
+      data_for_profile()
+    } else {
+      resolve_dataset(source)
+    }
   })
   
   output$dist_controls <- renderUI({
@@ -1493,9 +1611,16 @@ server <- function(input, output, session) {
     if (is.null(selected_source) || !selected_source %in% choices) {
       selected_source <- "transformed"
     }
+    cat_cols <- names(df)[vapply(df, function(x) is.character(x) || is.factor(x), logical(1))]
+    group_choices <- c("None", cat_cols)
+    selected_group <- input$dist_group_by
+    if (is.null(selected_group) || !selected_group %in% group_choices) {
+      selected_group <- "None"
+    }
     tagList(
       selectInput("dist_data_source", "Use dataset", choices = choices, selected = selected_source),
-      selectInput("dist_var", "Variable", choices = names(df))
+      selectInput("dist_var", "Variable", choices = names(df)),
+      selectInput("dist_group_by", "Group / Facet by (optional)", choices = group_choices, selected = selected_group)
     )
   })
   
@@ -1527,11 +1652,20 @@ server <- function(input, output, session) {
     df <- dist_data()
     var <- input$dist_var
     req(is.numeric(df[[var]]))
-    ggplot(df, aes(x = .data[[var]])) +
-      geom_histogram(aes(y = ..density..), fill = "#4E79A7", alpha = 0.7, bins = 30) +
-      geom_density(color = "#F28E2B", linewidth = 1) +
-      labs(title = paste("Distribution of", var), x = var, y = "Density") +
-      theme_minimal()
+    group_col <- input$dist_group_by %||% "None"
+    if (!identical(group_col, "None") && group_col %in% names(df)) {
+      ggplot(df, aes(x = .data[[var]], fill = .data[[group_col]])) +
+        geom_histogram(bins = 30, alpha = 0.7, position = "identity", na.rm = TRUE) +
+        facet_wrap(vars(.data[[group_col]]), scales = "free_y") +
+        labs(title = paste("Distribution of", var, "by", group_col), x = var, y = "Count", fill = group_col) +
+        theme_minimal()
+    } else {
+      ggplot(df, aes(x = .data[[var]])) +
+        geom_histogram(aes(y = ..density..), fill = "#4E79A7", alpha = 0.7, bins = 30) +
+        geom_density(color = "#F28E2B", linewidth = 1) +
+        labs(title = paste("Distribution of", var), x = var, y = "Density") +
+        theme_minimal()
+    }
   })
   
   output$box_plot <- renderPlot({
@@ -1539,10 +1673,18 @@ server <- function(input, output, session) {
     df <- dist_data()
     var <- input$dist_var
     req(is.numeric(df[[var]]))
-    ggplot(df, aes(y = .data[[var]])) +
-      geom_boxplot(fill = "#59A14F") +
-      labs(title = paste("Boxplot of", var), y = var) +
-      theme_minimal()
+    group_col <- input$dist_group_by %||% "None"
+    if (!identical(group_col, "None") && group_col %in% names(df)) {
+      ggplot(df, aes(x = .data[[group_col]], y = .data[[var]], fill = .data[[group_col]])) +
+        geom_boxplot(show.legend = FALSE, na.rm = TRUE) +
+        labs(title = paste(var, "by", group_col), x = group_col, y = var) +
+        theme_minimal()
+    } else {
+      ggplot(df, aes(y = .data[[var]])) +
+        geom_boxplot(fill = "#59A14F") +
+        labs(title = paste("Boxplot of", var), y = var) +
+        theme_minimal()
+    }
   })
   
   output$numeric_stats <- renderTable({
@@ -1566,21 +1708,49 @@ server <- function(input, output, session) {
     var <- input$dist_var
     req(!is.numeric(df[[var]]))
     top_k <- input$top_k %||% 10
-    counts <- df %>% count(.data[[var]], name = "n") %>% mutate(prop = n / sum(n)) %>% arrange(desc(n)) %>% slice_head(n = top_k)
-    ggplot(counts, aes(x = reorder(as.character(.data[[var]]), n), y = n, fill = n)) +
-      geom_col(show.legend = FALSE) +
-      coord_flip() +
-      labs(title = paste("Top", top_k, var), x = var, y = "Count") +
-      theme_minimal()
+    group_col <- input$dist_group_by %||% "None"
+    if (!identical(group_col, "None") && group_col %in% names(df)) {
+      var_sym <- rlang::sym(var)
+      group_sym <- rlang::sym(group_col)
+      counts <- df %>% count(!!var_sym, !!group_sym, name = "n")
+      totals <- counts %>% group_by(!!var_sym) %>% summarise(total = sum(n), .groups = "drop") %>% arrange(desc(total))
+      top_levels <- totals %>% slice_head(n = top_k) %>% pull(!!var_sym)
+      counts <- counts %>% filter(!!var_sym %in% top_levels) %>% group_by(!!var_sym) %>% mutate(total = sum(n)) %>% ungroup()
+      counts <- counts %>% mutate(var_label = forcats::fct_reorder(as.character(!!var_sym), total))
+      ggplot(counts, aes(x = var_label, y = n, fill = .data[[group_col]])) +
+        geom_col() +
+        coord_flip() +
+        labs(title = paste("Counts of", var, "by", group_col), x = var, y = "Count", fill = group_col) +
+        theme_minimal()
+    } else {
+      counts <- df %>% count(.data[[var]], name = "n") %>% mutate(prop = n / sum(n)) %>% arrange(desc(n)) %>% slice_head(n = top_k)
+      ggplot(counts, aes(x = reorder(as.character(.data[[var]]), n), y = n, fill = n)) +
+        geom_col(show.legend = FALSE) +
+        coord_flip() +
+        labs(title = paste("Top", top_k, var), x = var, y = "Count") +
+        theme_minimal()
+    }
   })
-  
+
   output$cat_stats <- renderTable({
     req(input$dist_var)
-    df <- data_transformed()
+    df <- dist_data()
     var <- input$dist_var
     req(!is.numeric(df[[var]]))
-    counts <- df %>% count(.data[[var]], name = "count") %>% mutate(prop = count / sum(count)) %>% arrange(desc(count))
-    head(counts, input$top_k %||% 10)
+    group_col <- input$dist_group_by %||% "None"
+    top_k <- input$top_k %||% 10
+    if (!identical(group_col, "None") && group_col %in% names(df)) {
+      var_sym <- rlang::sym(var)
+      group_sym <- rlang::sym(group_col)
+      counts <- df %>% count(!!var_sym, !!group_sym, name = "count")
+      totals <- counts %>% group_by(!!var_sym) %>% summarise(total = sum(count), .groups = "drop") %>% arrange(desc(total))
+      top_levels <- totals %>% slice_head(n = top_k) %>% pull(!!var_sym)
+      counts <- counts %>% filter(!!var_sym %in% top_levels) %>% group_by(!!var_sym) %>% mutate(total = sum(count), prop = count / sum(count)) %>% ungroup()
+      counts %>% arrange(desc(total), desc(count)) %>% select(!!var_sym, !!group_sym, count, prop) %>% mutate(prop = scales::percent(prop))
+    } else {
+      counts <- df %>% count(.data[[var]], name = "count") %>% mutate(prop = count / sum(count)) %>% arrange(desc(count))
+      head(counts, top_k)
+    }
   })
   
   # Relationships tab ------------------------------------------------------
@@ -1599,6 +1769,18 @@ server <- function(input, output, session) {
     choices <- dataset_source_choices()
     selected_source <- input$rel_data_source
     if (is.null(selected_source) || !selected_source %in% choices) selected_source <- "transformed"
+    selected_cat_a <- input$rel_cat_a
+    if (is.null(selected_cat_a) || !selected_cat_a %in% factor_cols) {
+      selected_cat_a <- if (length(factor_cols) > 0) factor_cols[1] else NULL
+    }
+    selected_cat_b <- input$rel_cat_b
+    if (is.null(selected_cat_b) || !selected_cat_b %in% factor_cols) {
+      if (length(factor_cols) > 1) {
+        selected_cat_b <- factor_cols[2]
+      } else {
+        selected_cat_b <- selected_cat_a
+      }
+    }
     tagList(
       selectInput("rel_data_source", "Use dataset", choices = choices, selected = selected_source),
       fluidRow(
@@ -1611,6 +1793,11 @@ server <- function(input, output, session) {
       fluidRow(
         column(6, selectInput("rel_group_num", "Numeric", choices = numeric_cols)),
         column(6, selectInput("rel_group_cat", "Group", choices = factor_cols))
+      ),
+      hr(),
+      fluidRow(
+        column(6, selectInput("rel_cat_a", "Categorical A", choices = factor_cols, selected = selected_cat_a)),
+        column(6, selectInput("rel_cat_b", "Categorical B", choices = factor_cols, selected = selected_cat_b))
       )
     )
   })
@@ -1622,7 +1809,9 @@ server <- function(input, output, session) {
       tagList(
         plotOutput("scatter_plot"),
         verbatimTextOutput("scatter_stats"),
-        plotOutput("group_summary_plot")
+        plotOutput("group_summary_plot"),
+        tableOutput("rel_crosstab"),
+        verbatimTextOutput("rel_chisq")
       )
     }
   })
@@ -1671,11 +1860,58 @@ server <- function(input, output, session) {
       labs(title = paste("Grouped means of", input$rel_group_num), x = input$rel_group_cat, y = "Mean ± 95% CI") +
       theme_minimal()
   })
+
+  # --- Relationships: categorical insights -------------------------------
+  output$rel_crosstab <- renderTable({
+    cat_a <- input$rel_cat_a
+    cat_b <- input$rel_cat_b
+    if (is.null(cat_a) || is.null(cat_b) || cat_a == "" || cat_b == "") {
+      return(tibble(message = "Select categorical columns."))
+    }
+    df <- rel_data()
+    if (!cat_a %in% names(df) || !cat_b %in% names(df)) {
+      return(tibble(message = "Select categorical columns."))
+    }
+    cat_a_sym <- rlang::sym(cat_a)
+    cat_b_sym <- rlang::sym(cat_b)
+    counts <- df %>% filter(!is.na(.data[[cat_a]]), !is.na(.data[[cat_b]])) %>% count(!!cat_a_sym, !!cat_b_sym, name = "count")
+    if (nrow(counts) == 0) {
+      return(tibble(message = "No combinations to display."))
+    }
+    counts %>% tidyr::pivot_wider(names_from = !!cat_b_sym, values_from = count, values_fill = 0)
+  })
+
+  output$rel_chisq <- renderText({
+    cat_a <- input$rel_cat_a
+    cat_b <- input$rel_cat_b
+    if (is.null(cat_a) || is.null(cat_b) || cat_a == "" || cat_b == "") {
+      return("Select categorical columns.")
+    }
+    df <- rel_data()
+    if (!cat_a %in% names(df) || !cat_b %in% names(df)) {
+      return("Select categorical columns.")
+    }
+    df_clean <- df %>% select(all_of(c(cat_a, cat_b))) %>% filter(!is.na(.data[[cat_a]]), !is.na(.data[[cat_b]]))
+    if (nrow(df_clean) == 0) {
+      return("No data for chi-squared test.")
+    }
+    tbl <- table(df_clean[[cat_a]], df_clean[[cat_b]])
+    ctest <- tryCatch(chisq.test(tbl), error = function(e) e)
+    if (inherits(ctest, "htest")) {
+      sprintf("Chi-squared test: X-squared = %.3f, df = %s, p-value = %.5f", ctest$statistic, paste(ctest$parameter, collapse = ","), ctest$p.value)
+    } else {
+      paste("Chi-squared test unavailable:", ctest$message)
+    }
+  })
   
   # Correlation tab -------------------------------------------------------
   corr_data <- reactive({
     source <- input$corr_data_source %||% "transformed"
-    resolve_dataset(source)
+    if (identical(source, "transformed")) {
+      data_for_profile()
+    } else {
+      resolve_dataset(source)
+    }
   })
   
   output$corr_controls <- renderUI({
@@ -1925,7 +2161,9 @@ server <- function(input, output, session) {
       selectInput("time_date_col", "Date column", choices = date_cols, selected = input$time_date_col %||% date_cols[1]),
       selectInput("time_measure_col", "Numeric measure", choices = numeric_cols, selected = input$time_measure_col %||% numeric_cols[1]),
       selectInput("time_period", "Aggregation", choices = c("Day" = "day", "Week" = "week", "Month" = "month", "Quarter" = "quarter", "Year" = "year"), selected = input$time_period %||% "month"),
-      selectInput("time_group_col", "Group by (optional)", choices = c("None", cat_cols), selected = input$time_group_col %||% "None")
+      selectInput("time_group_col", "Group by (optional)", choices = c("None", cat_cols), selected = input$time_group_col %||% "None"),
+      selectInput("time_agg_fun", "Aggregation function", choices = c("Mean" = "mean", "Sum" = "sum", "Median" = "median", "Max" = "max", "Min" = "min"), selected = input$time_agg_fun %||% "mean"),
+      dateRangeInput("time_date_range", "Date range (optional)", start = if (!is.null(input$time_date_range)) input$time_date_range[1] else NULL, end = if (!is.null(input$time_date_range)) input$time_date_range[2] else NULL)
     )
   })
   
@@ -1936,31 +2174,47 @@ server <- function(input, output, session) {
     value_col <- input$time_measure_col
     period <- input$time_period %||% "month"
     group_col <- input$time_group_col %||% "None"
-    
+    agg_fun <- input$time_agg_fun %||% "mean"
+
     if (is.null(df) || is.null(date_col) || is.null(value_col)) return(tibble())
     if (!date_col %in% names(df) || !value_col %in% names(df)) return(tibble())
     if (!is.numeric(df[[value_col]])) return(tibble())
-    
+
     dt <- df[[date_col]]
     dt_posix <- suppressWarnings(as.POSIXct(dt, tz = "UTC"))
     if (all(is.na(dt_posix))) {
       dt_posix <- as.POSIXct(as.Date(dt), tz = "UTC")
     }
+    date_range <- input$time_date_range
+    if (!is.null(date_range) && length(date_range) == 2 && !all(is.na(dt_posix))) {
+      start <- date_range[1]
+      end <- date_range[2]
+      if (!is.na(start) && !is.na(end)) {
+        start_posix <- as.POSIXct(start, tz = "UTC")
+        end_posix <- as.POSIXct(end, tz = "UTC") + (24 * 60 * 60 - 1)
+        keep <- dt_posix >= start_posix & dt_posix <= end_posix
+        keep[is.na(keep)] <- FALSE
+        df <- df[keep, , drop = FALSE]
+        dt_posix <- dt_posix[keep]
+      }
+    }
+    if (nrow(df) == 0) return(tibble())
     floored <- lubridate::floor_date(dt_posix, unit = period)
-    
+
     base_tbl <- tibble(.period = floored, value = df[[value_col]])
-    
+    fun <- tryCatch(match.fun(agg_fun), error = function(e) mean)
+
     # if grouping is chosen and exists, keep it
     if (!identical(group_col, "None") && group_col %in% names(df)) {
       base_tbl[[group_col]] <- df[[group_col]]
       agg <- base_tbl %>%
         group_by(.period, .data[[group_col]]) %>%
-        summarise(measure = mean(value, na.rm = TRUE), .groups = "drop") %>%
+        summarise(measure = fun(value, na.rm = TRUE), .groups = "drop") %>%
         arrange(.period, .data[[group_col]])
     } else {
       agg <- base_tbl %>%
         group_by(.period) %>%
-        summarise(measure = mean(value, na.rm = TRUE), .groups = "drop") %>%
+        summarise(measure = fun(value, na.rm = TRUE), .groups = "drop") %>%
         arrange(.period)
     }
     
@@ -2206,7 +2460,7 @@ server <- function(input, output, session) {
   
   output$missing_map <- renderPlot({
     req(!is_demo())
-    df <- data_transformed() %>% head(100)
+    df <- data_for_profile() %>% head(100)
     if (has_naniar) {
       naniar::vis_miss(df)
     } else {
