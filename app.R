@@ -75,7 +75,11 @@ mutate_helpers <- c(
   "Min-Max Scale" = "minmax",
   "Parse Dates" = "parsedate",
   "String Case" = "stringcase",
-  "Winsorize" = "winsor"
+  "Winsorize" = "winsor",
+  "Date Parts" = "dateparts",
+  "String Split / Extract" = "stringextract",
+  "Factor Lumping" = "factorlump",
+  "Simple Impute" = "impute"
 )
 
 string_case_opts <- c("Lower" = "lower", "Upper" = "upper", "Title" = "title", "Trim" = "trim")
@@ -101,7 +105,15 @@ ui <- page_sidebar(
     hr(),
     strong("Ingest diagnostics"),
     tableOutput("ingest_summary"),
-    tableOutput("missing_summary")
+    tableOutput("missing_summary"),
+    hr(),
+    h4("Additional Data"),
+    fileInput("secondary_file", "Upload secondary file", accept = c(".xlsx", ".xls", ".csv")),
+    uiOutput("secondary_sheet_picker"),
+    checkboxInput("secondary_use_header", "First row has headers", value = TRUE),
+    checkboxInput("secondary_trim_ws", "Trim whitespace", value = TRUE),
+    checkboxInput("secondary_clean_names", "Clean column names", value = TRUE),
+    checkboxInput("secondary_guess_types", "Guess column types", value = TRUE)
   ),
   # Main navbar with analytical tabs
   navbarPage(
@@ -115,6 +127,7 @@ ui <- page_sidebar(
       ),
       hr(),
       h4("Data dictionary"),
+      downloadButton("download_dictionary", "Download data dictionary"),
       DTOutput("data_dictionary"),
       hr(),
       downloadButton("download_report", "Download HTML summary")
@@ -161,6 +174,31 @@ ui <- page_sidebar(
         )
       )
     ),
+    # --- Joins tab ------------------------------------------------------
+    tabPanel(
+      "Joins",
+      fluidRow(
+        column(
+          width = 4,
+          selectInput("join_left_table", "Left table", choices = NULL),
+          selectInput("join_right_table", "Right table", choices = NULL),
+          uiOutput("join_key_inputs"),
+          selectInput("join_type", "Join type", choices = c(
+            "Left" = "left",
+            "Right" = "right",
+            "Inner" = "inner",
+            "Full" = "full",
+            "Semi" = "semi",
+            "Anti" = "anti"
+          )),
+          helpText("Joined data will be available to other tabs when keys are selected.")
+        ),
+        column(
+          width = 8,
+          DTOutput("join_preview")
+        )
+      )
+    ),
     tabPanel(
       "Distributions",
       uiOutput("dist_controls"),
@@ -176,6 +214,22 @@ ui <- page_sidebar(
       uiOutput("corr_controls"),
       uiOutput("corr_outputs")
     ),
+    # --- Target EDA tab -------------------------------------------------
+    tabPanel(
+      "Target EDA",
+      fluidRow(
+        column(4, uiOutput("target_controls")),
+        column(8, uiOutput("target_outputs"))
+      )
+    ),
+    # --- Time Series tab ------------------------------------------------
+    tabPanel(
+      "Time Series",
+      fluidRow(
+        column(4, uiOutput("time_series_controls")),
+        column(8, uiOutput("time_series_outputs"))
+      )
+    ),
     tabPanel(
       "Quality",
       uiOutput("quality_outputs")
@@ -188,7 +242,11 @@ ui <- page_sidebar(
       hr(),
       h4("Download transformed data"),
       downloadButton("download_tr_csv", "Download CSV"),
-      downloadButton("download_tr_xlsx", "Download XLSX")
+      downloadButton("download_tr_xlsx", "Download XLSX"),
+      hr(),
+      h4("Pipeline state"),
+      textAreaInput("pipeline_state_json", "Pipeline JSON", value = "", rows = 10),
+      fileInput("pipeline_state_upload", "Import pipeline JSON", accept = c(".json"))
     )
   )
 )
@@ -231,6 +289,19 @@ server <- function(input, output, session) {
     }
   })
 
+  output$secondary_sheet_picker <- renderUI({
+    file <- input$secondary_file
+    if (is.null(file)) return(NULL)
+    ext <- tolower(tools::file_ext(file$name))
+    if (!ext %in% c("xlsx", "xls")) return(NULL)
+    sheets <- tryCatch(excel_sheets(file$datapath), error = function(e) {
+      showNotification("Unable to read sheets from secondary file.", type = "error")
+      NULL
+    })
+    if (is.null(sheets) || length(sheets) == 0) return(NULL)
+    selectInput("secondary_sheet", "Sheet", choices = sheets, selected = sheets[1])
+  })
+
   # Build the raw data reactive -------------------------------------------
   data_raw <- reactive({
     if (is_demo()) {
@@ -261,6 +332,173 @@ server <- function(input, output, session) {
     }
     df
   })
+
+  data_secondary_raw <- reactive({
+    file <- input$secondary_file
+    if (is.null(file)) return(NULL)
+    ext <- tolower(tools::file_ext(file$name))
+    df <- tryCatch({
+      if (ext %in% c("xlsx", "xls")) {
+        sheet <- req(input$secondary_sheet)
+        col_names <- if (isTRUE(input$secondary_use_header)) TRUE else FALSE
+        col_types <- if (isTRUE(input$secondary_guess_types)) NULL else "text"
+        read_excel(
+          path = file$datapath,
+          sheet = sheet,
+          col_names = col_names,
+          trim_ws = isTRUE(input$secondary_trim_ws),
+          col_types = col_types
+        )
+      } else if (ext == "csv") {
+        read.csv(
+          file$datapath,
+          header = isTRUE(input$secondary_use_header),
+          stringsAsFactors = FALSE,
+          check.names = FALSE,
+          strip.white = isTRUE(input$secondary_trim_ws)
+        )
+      } else {
+        showNotification("Unsupported secondary file type.", type = "error")
+        return(NULL)
+      }
+    }, error = function(e) {
+      showNotification(paste("Failed to read secondary file:", e$message), type = "error")
+      NULL
+    })
+    if (is.null(df)) return(NULL)
+    if (!isTRUE(input$secondary_use_header)) {
+      names(df) <- paste0("col_", seq_along(df))
+    }
+    df <- tibble::as_tibble(df)
+    if (isTRUE(input$secondary_trim_ws)) {
+      df <- df %>% mutate(across(where(is.character), ~ stringr::str_trim(.x)))
+    }
+    if (isTRUE(input$secondary_clean_names)) {
+      df <- janitor::clean_names(df)
+    }
+    df
+  })
+
+  data_secondary_transformed <- reactive({
+    df <- data_secondary_raw()
+    if (is.null(df)) return(NULL)
+    df
+  })
+
+  table_choices <- reactive({
+    choices <- c("Primary (transformed)" = "primary_transformed", "Primary (raw)" = "primary_raw")
+    if (!is.null(data_secondary_raw())) {
+      choices <- c(choices, "Secondary (raw)" = "secondary_raw")
+    }
+    if (!is.null(data_secondary_transformed())) {
+      choices <- c(choices, "Secondary (transformed)" = "secondary_transformed")
+    }
+    choices
+  })
+
+  join_table_data <- function(code) {
+    switch(
+      code,
+      primary_raw = data_raw(),
+      primary_transformed = data_transformed(),
+      secondary_raw = data_secondary_raw(),
+      secondary_transformed = data_secondary_transformed(),
+      NULL
+    )
+  }
+
+  observe({
+    choices <- table_choices()
+    if (is.null(choices) || length(choices) == 0) return()
+    current_left <- input$join_left_table
+    left_selected <- if (!is.null(current_left) && current_left %in% unname(choices)) current_left else "primary_transformed"
+    default_right <- if ("secondary_raw" %in% unname(choices)) "secondary_raw" else "primary_raw"
+    current_right <- input$join_right_table
+    right_selected <- if (!is.null(current_right) && current_right %in% unname(choices)) current_right else default_right
+    updateSelectInput(session, "join_left_table", choices = choices, selected = left_selected)
+    updateSelectInput(session, "join_right_table", choices = choices, selected = right_selected)
+  })
+
+  output$join_key_inputs <- renderUI({
+    left_df <- join_table_data(input$join_left_table)
+    right_df <- join_table_data(input$join_right_table)
+    if (is.null(left_df) || is.null(right_df)) {
+      return(helpText("Load both datasets to configure join keys."))
+    }
+    choices_left <- names(left_df)
+    choices_right <- names(right_df)
+    defaults <- intersect(choices_left, choices_right)
+    selected_left <- isolate(input$join_key_left)
+    if (is.null(selected_left) || !all(selected_left %in% choices_left)) {
+      selected_left <- defaults
+    }
+    selected_right <- isolate(input$join_key_right)
+    if (is.null(selected_right) || length(selected_right) != length(selected_left) || !all(selected_right %in% choices_right)) {
+      selected_right <- defaults
+    }
+    tagList(
+      selectizeInput("join_key_left", "Left key(s)", choices = choices_left, selected = selected_left, multiple = TRUE, options = list(placeholder = "Select join keys")),
+      selectizeInput("join_key_right", "Right key(s)", choices = choices_right, selected = selected_right, multiple = TRUE, options = list(placeholder = "Select join keys"))
+    )
+  })
+
+  data_joined <- reactive({
+    left_code <- input$join_left_table
+    right_code <- input$join_right_table
+    left_keys <- input$join_key_left
+    right_keys <- input$join_key_right
+    join_type <- input$join_type %||% "left"
+    left_df <- join_table_data(left_code)
+    right_df <- join_table_data(right_code)
+    if (is.null(left_df) || is.null(right_df)) return(NULL)
+    left_keys <- left_keys[left_keys %in% names(left_df)]
+    right_keys <- right_keys[right_keys %in% names(right_df)]
+    if (is.null(left_keys) || is.null(right_keys) || length(left_keys) == 0 || length(left_keys) != length(right_keys)) {
+      return(NULL)
+    }
+    by <- setNames(right_keys, left_keys)
+    tryCatch({
+      res <- switch(
+        join_type,
+        left = dplyr::left_join(left_df, right_df, by = by),
+        right = dplyr::right_join(left_df, right_df, by = by),
+        inner = dplyr::inner_join(left_df, right_df, by = by),
+        full = dplyr::full_join(left_df, right_df, by = by),
+        semi = dplyr::semi_join(left_df, right_df, by = by),
+        anti = dplyr::anti_join(left_df, right_df, by = by),
+        dplyr::left_join(left_df, right_df, by = by)
+      )
+      tibble::as_tibble(res)
+    }, error = function(e) {
+      showNotification(paste("Join failed:", e$message), type = "error")
+      NULL
+    })
+  })
+
+  output$join_preview <- renderDT({
+    df <- data_joined()
+    validate(need(!is.null(df), "Configure join inputs to view preview."))
+    datatable(df, options = list(scrollX = TRUE, pageLength = 10))
+  })
+
+  dataset_source_choices <- reactive({
+    choices <- c("Transformed" = "transformed")
+    joined <- data_joined()
+    if (!is.null(joined) && nrow(joined) > 0 && ncol(joined) > 0) {
+      choices <- c(choices, "Joined" = "joined")
+    }
+    choices
+  })
+
+  resolve_dataset <- function(source) {
+    if (identical(source, "joined")) {
+      joined <- data_joined()
+      validate(need(!is.null(joined) && nrow(joined) > 0, "Join data to use this source."))
+      joined
+    } else {
+      data_transformed()
+    }
+  }
 
   # Diagnostics ------------------------------------------------------------
   ingest_summary_tbl <- reactive({
@@ -344,7 +582,9 @@ server <- function(input, output, session) {
     df <- data_raw()
     cols <- names(df)
     numeric_cols <- cols[vapply(df, is.numeric, logical(1))]
-    list(cols = cols, numeric = numeric_cols)
+    date_cols <- cols[vapply(df, function(x) inherits(x, c("Date", "POSIXct", "POSIXt")), logical(1))]
+    string_cols <- cols[vapply(df, function(x) is.character(x) || is.factor(x), logical(1))]
+    list(cols = cols, numeric = numeric_cols, date = date_cols, string = string_cols, categorical = string_cols)
   })
 
   output$mutate_params <- renderUI({
@@ -384,6 +624,42 @@ server <- function(input, output, session) {
         textInput("mutate_new", "New column name"),
         selectInput("mutate_col_a", "Column", choices = params$numeric),
         sliderInput("mutate_winsor", "Percentile", min = 0, max = 20, value = 5)
+      ),
+      dateparts = {
+        date_choices <- if (length(params$date) > 0) params$date else params$cols
+        tagList(
+          selectInput("mutate_col_a", "Date column", choices = date_choices),
+          textInput("mutate_date_prefix", "Prefix for new columns", value = if (length(date_choices) > 0) paste0(date_choices[1], "_") else "date_"),
+          checkboxGroupInput("mutate_date_parts", "Parts to extract", choices = c("Year" = "year", "Quarter" = "quarter", "Month" = "month", "Week" = "week", "Weekday" = "wday"), selected = c("year", "month"))
+        )
+      },
+      stringextract = {
+        str_choices <- if (length(params$string) > 0) params$string else params$cols
+        tagList(
+          textInput("mutate_new", "New column name"),
+          selectInput("mutate_col_a", "Text column", choices = str_choices),
+          radioButtons("mutate_extract_mode", "Mode", choices = c("Split" = "split", "Regex" = "regex"), inline = TRUE),
+          textInput("mutate_pattern", "Separator or pattern"),
+          textInput("mutate_regex_group", "Regex group (optional)")
+        )
+      },
+      factorlump = {
+        cat_choices <- if (length(params$categorical) > 0) params$categorical else params$cols
+        tagList(
+          textInput("mutate_new", "New column name"),
+          selectInput("mutate_col_a", "Categorical column", choices = cat_choices),
+          numericInput("mutate_lump_n", "Keep top N", value = 5, min = 1, step = 1)
+        )
+      },
+      impute = tagList(
+        textInput("mutate_new", "New column name"),
+        selectInput("mutate_col_a", "Column", choices = params$cols),
+        selectInput("mutate_impute_method", "Strategy", choices = c("Mean" = "mean", "Median" = "median", "Mode" = "mode", "Constant" = "constant")),
+        conditionalPanel(
+          condition = "input.mutate_impute_method == 'constant'",
+          textInput("mutate_impute_constant", "Constant value")
+        ),
+        checkboxInput("mutate_impute_flag", "Create _is_imputed flag", value = FALSE)
       )
     )
   })
@@ -394,17 +670,64 @@ server <- function(input, output, session) {
   observeEvent(input$add_mutate, {
     helper <- req(input$mutate_helper)
     params <- list(type = helper)
-    params$new <- input$mutate_new
-    params$col_a <- input$mutate_col_a
-    params$col_b <- input$mutate_col_b
-    params$op <- input$mutate_arith_op
-    params$log_base <- input$mutate_log_base
-    params$case <- input$mutate_case
-    params$format <- input$mutate_format
-    params$winsor <- input$mutate_winsor
-    if (is.null(params$new) || params$new == "") {
-      showNotification("Please provide a name for the new column.", type = "warning")
-      return()
+    if (helper == "dateparts") {
+      params$col_a <- input$mutate_col_a
+      params$parts <- input$mutate_date_parts
+      params$prefix <- input$mutate_date_prefix
+      if (is.null(params$col_a) || params$col_a == "") {
+        showNotification("Select a date column for date parts.", type = "warning")
+        return()
+      }
+      if (is.null(params$parts) || length(params$parts) == 0) {
+        showNotification("Choose at least one date part to extract.", type = "warning")
+        return()
+      }
+      params$new <- params$prefix %||% paste0(params$col_a, "_")
+    } else {
+      params$new <- input$mutate_new
+      if (is.null(params$new) || params$new == "") {
+        showNotification("Please provide a name for the new column.", type = "warning")
+        return()
+      }
+      params$col_a <- input$mutate_col_a
+      if (is.null(params$col_a) || params$col_a == "") {
+        showNotification("Select a source column.", type = "warning")
+        return()
+      }
+    }
+    if (helper == "arithmetic") {
+      params$col_b <- input$mutate_col_b
+      params$op <- input$mutate_arith_op
+      if (is.null(params$col_b) || params$col_b == "") {
+        showNotification("Select a second column for arithmetic operations.", type = "warning")
+        return()
+      }
+    } else if (helper == "log") {
+      params$log_base <- input$mutate_log_base
+    } else if (helper == "stringcase") {
+      params$case <- input$mutate_case
+    } else if (helper == "parsedate") {
+      params$format <- input$mutate_format
+    } else if (helper == "winsor") {
+      params$winsor <- input$mutate_winsor
+    } else if (helper == "stringextract") {
+      params$pattern <- input$mutate_pattern
+      params$mode <- input$mutate_extract_mode %||% "split"
+      params$regex_group <- input$mutate_regex_group
+      if (is.null(params$pattern) || params$pattern == "") {
+        showNotification("Provide a separator or pattern for extraction.", type = "warning")
+        return()
+      }
+    } else if (helper == "factorlump") {
+      params$lump_n <- input$mutate_lump_n %||% 5
+    } else if (helper == "impute") {
+      params$method <- input$mutate_impute_method %||% "mean"
+      params$constant <- input$mutate_impute_constant
+      params$flag <- isTRUE(input$mutate_impute_flag)
+      if (identical(params$method, "constant") && (is.null(params$constant) || params$constant == "")) {
+        showNotification("Provide a constant value for imputation.", type = "warning")
+        return()
+      }
     }
     current <- mutate_steps()
     current[[paste0("step_", length(current) + 1)]] <- params
@@ -609,6 +932,86 @@ server <- function(input, output, session) {
       upper <- 1 - lower
       q <- quantile(df[[col]], probs = c(lower, upper), na.rm = TRUE)
       df <- df %>% mutate(!!new_col := pmin(pmax(.data[[col]], q[1]), q[2]))
+    } else if (step$type == "dateparts") {
+      parts <- step$parts %||% character(0)
+      prefix <- step$new %||% paste0(col, "_")
+      if (length(parts) > 0) {
+        for (part in parts) {
+          new_name <- paste0(prefix, part)
+          df <- df %>% mutate(!!new_name := {
+            val <- .data[[col]]
+            if (!inherits(val, c("Date", "POSIXct", "POSIXt"))) {
+              val <- suppressWarnings(lubridate::ymd(val))
+            }
+            if (part == "year") {
+              lubridate::year(val)
+            } else if (part == "quarter") {
+              lubridate::quarter(val)
+            } else if (part == "month") {
+              lubridate::month(val)
+            } else if (part == "week") {
+              lubridate::isoweek(val)
+            } else if (part == "wday") {
+              lubridate::wday(val, label = TRUE, abbr = TRUE)
+            } else {
+              NA
+            }
+          })
+        }
+      }
+    } else if (step$type == "stringextract") {
+      pattern <- step$pattern %||% ""
+      mode <- step$mode %||% "split"
+      df <- df %>% mutate(!!new_col := {
+        val <- as.character(.data[[col]])
+        if (mode == "regex") {
+          grp <- suppressWarnings(as.integer(step$regex_group))
+          if (!is.na(grp) && grp >= 1) {
+            mat <- stringr::str_match(val, pattern)
+            if (!is.null(mat) && ncol(mat) > grp) mat[, grp + 1] else NA_character_
+          } else {
+            stringr::str_extract(val, pattern)
+          }
+        } else {
+          pieces <- stringr::str_split(val, pattern)
+          vapply(pieces, function(x) if (length(x) >= 1) x[[1]] else NA_character_, character(1))
+        }
+      })
+    } else if (step$type == "factorlump") {
+      n <- step$lump_n %||% 5
+      df <- df %>% mutate(!!new_col := forcats::fct_lump_n(as.factor(.data[[col]]), n = n))
+    } else if (step$type == "impute") {
+      method <- step$method %||% "mean"
+      flag_name <- if (isTRUE(step$flag)) paste0(step$new, "_is_imputed") else NULL
+      df <- df %>% mutate(
+        !!new_col := {
+          vec <- .data[[col]]
+          miss <- is.na(vec)
+          fill <- if (method == "mean") {
+            mean(vec, na.rm = TRUE)
+          } else if (method == "median") {
+            median(vec, na.rm = TRUE)
+          } else if (method == "mode") {
+            tbl <- table(vec)
+            if (length(tbl) == 0) NA else names(tbl)[which.max(tbl)]
+          } else if (method == "constant") {
+            if (is.numeric(vec)) {
+              suppressWarnings(as.numeric(step$constant))
+            } else {
+              step$constant
+            }
+          } else {
+            NA
+          }
+          if (is.numeric(vec) && !is.numeric(fill)) {
+            fill <- suppressWarnings(as.numeric(fill))
+          }
+          ifelse(miss, fill, vec)
+        }
+      )
+      if (!is.null(flag_name)) {
+        df <- df %>% mutate(!!flag_name := is.na(.data[[col]]))
+      }
     }
     df
   }
@@ -638,6 +1041,53 @@ server <- function(input, output, session) {
     } else if (step$type == "winsor") {
       p <- ifelse(is.null(step$winsor), 5, step$winsor)
       glue::glue("dplyr::mutate({new_col} = scales::squish(.data[['{col}']], range = quantile(.data[['{col}']], probs = c({p}/100, 1-{p}/100), na.rm = TRUE)))")
+    } else if (step$type == "dateparts") {
+      parts <- step$parts %||% character(0)
+      if (length(parts) == 0) return(NULL)
+      prefix <- step$new %||% paste0(col, "_")
+      part_expr <- purrr::map_chr(parts, function(part) {
+        expr <- switch(part,
+          year = "lubridate::year(.data[['{col}']])",
+          quarter = "lubridate::quarter(.data[['{col}']])",
+          month = "lubridate::month(.data[['{col}']])",
+          week = "lubridate::isoweek(.data[['{col}']])",
+          wday = "lubridate::wday(.data[['{col}']], label = TRUE, abbr = TRUE)",
+          "NA"
+        )
+        glue::glue("{prefix}{part} = {expr}")
+      })
+      glue::glue("dplyr::mutate({paste(part_expr, collapse = ', ')})")
+    } else if (step$type == "stringextract") {
+      pattern <- stringr::str_replace_all(step$pattern %||% "", "'", "\\\\'")
+      mode <- step$mode %||% "split"
+      if (mode == "regex") {
+        grp <- suppressWarnings(as.integer(step$regex_group))
+        if (!is.na(grp) && grp >= 1) {
+          glue::glue("dplyr::mutate({new_col} = stringr::str_match(.data[['{col}']], '{pattern}')[, {grp + 1}])")
+        } else {
+          glue::glue("dplyr::mutate({new_col} = stringr::str_extract(.data[['{col}']], '{pattern}'))")
+        }
+      } else {
+        glue::glue("dplyr::mutate({new_col} = stringr::str_split(.data[['{col}']], '{pattern}', n = 2, simplify = TRUE)[,1])")
+      }
+    } else if (step$type == "factorlump") {
+      n <- step$lump_n %||% 5
+      glue::glue("dplyr::mutate({new_col} = forcats::fct_lump_n(as.factor(.data[['{col}']]), n = {n}))")
+    } else if (step$type == "impute") {
+      method <- step$method %||% "mean"
+      fill_expr <- switch(method,
+        mean = glue::glue("mean(.data[['{col}']], na.rm = TRUE)"),
+        median = glue::glue("stats::median(.data[['{col}']], na.rm = TRUE)"),
+        mode = glue::glue("names(sort(table(.data[['{col}']]), decreasing = TRUE))[1]"),
+        constant = {
+          const <- step$constant %||% ""
+          num_const <- suppressWarnings(as.numeric(const))
+          if (!is.na(num_const)) as.character(num_const) else glue::glue("'{stringr::str_replace_all(const, "'", "\\\\'")}'")
+        },
+        "NA"
+      )
+      flag_code <- if (isTRUE(step$flag)) glue::glue(", {new_col}_is_imputed = is.na(.data[['{col}']])") else ""
+      glue::glue("dplyr::mutate({new_col} = ifelse(is.na(.data[['{col}']]), {fill_expr}, .data[['{col}']]){flag_code})")
     } else {
       NULL
     }
@@ -809,6 +1259,100 @@ server <- function(input, output, session) {
 
   output$pipeline_code <- renderText({ pipeline_code() })
 
+  export_pipeline_state <- function() {
+    list(
+      filters = current_filters(),
+      selected_cols = input$selected_cols,
+      rename_mapping = as.data.frame(rename_mapping(), stringsAsFactors = FALSE),
+      mutate_steps = mutate_steps(),
+      group_vars = input$group_vars,
+      summary_cols = input$summary_cols,
+      summary_fns = input$summary_fns,
+      pivot = list(
+        mode = input$pivot_mode,
+        longer_ids = input$pivot_longer_ids,
+        longer_vals = input$pivot_longer_vals,
+        wider_names = input$pivot_wider_names,
+        wider_values = input$pivot_wider_values
+      ),
+      drop_outliers = isTRUE(input$drop_outliers)
+    )
+  }
+
+  import_pipeline_state <- function(state) {
+    if (is.null(state) || !is.list(state)) return()
+    filters <- state$filters
+    filter_total <- max(1, length(filters %||% list()))
+    filter_count(filter_total)
+    session$onFlushed(function() {
+      if (!is.null(filters)) {
+        for (i in seq_len(filter_total)) {
+          flt <- filters[[i]]
+          if (is.null(flt)) next
+          if (!is.null(flt$column) && flt$column %in% names(data_raw())) updateSelectInput(session, paste0("filter_col_", i), selected = flt$column)
+          if (!is.null(flt$operator)) updateSelectInput(session, paste0("filter_op_", i), selected = flt$operator)
+          if (!is.null(flt$value)) updateTextInput(session, paste0("filter_val_", i), value = flt$value)
+        }
+      } else {
+        updateTextInput(session, "filter_val_1", value = "")
+      }
+    }, once = TRUE)
+
+    if (!is.null(state$selected_cols)) {
+      cols <- intersect(state$selected_cols, names(data_raw()))
+      updateCheckboxGroupInput(session, "selected_cols", selected = cols)
+    }
+
+    if (!is.null(state$rename_mapping)) {
+      mapping <- as.data.frame(state$rename_mapping, stringsAsFactors = FALSE)
+      session$onFlushed(function() {
+        if (!is.null(mapping$original) && !is.null(mapping$renamed)) {
+          for (i in seq_len(nrow(mapping))) {
+            original <- mapping$original[i]
+            if (!is.null(original) && original %in% names(data_raw())) {
+              updateTextInput(session, paste0("rename_", original), value = mapping$renamed[i])
+            }
+          }
+        }
+      }, once = TRUE)
+    }
+
+    mutate_steps(state$mutate_steps %||% list())
+    updateSelectizeInput(session, "group_vars", selected = intersect(state$group_vars %||% character(0), names(data_raw())))
+    updateSelectizeInput(session, "summary_cols", selected = intersect(state$summary_cols %||% character(0), names(data_raw())))
+    updateCheckboxGroupInput(session, "summary_fns", selected = intersect(state$summary_fns %||% character(0), summary_funcs))
+
+    if (!is.null(state$pivot)) {
+      updateRadioButtons(session, "pivot_mode", selected = state$pivot$mode %||% "none")
+      session$onFlushed(function() {
+        updateSelectizeInput(session, "pivot_longer_ids", selected = state$pivot$longer_ids %||% character(0))
+        updateSelectizeInput(session, "pivot_longer_vals", selected = state$pivot$longer_vals %||% character(0))
+        if (!is.null(state$pivot$wider_names)) updateSelectInput(session, "pivot_wider_names", selected = state$pivot$wider_names)
+        if (!is.null(state$pivot$wider_values)) updateSelectInput(session, "pivot_wider_values", selected = state$pivot$wider_values)
+      }, once = TRUE)
+    }
+
+    updateCheckboxInput(session, "drop_outliers", value = isTRUE(state$drop_outliers))
+    showNotification("Pipeline state imported.", type = "message")
+  }
+
+  observe({
+    json_txt <- jsonlite::toJSON(export_pipeline_state(), auto_unbox = TRUE, pretty = TRUE)
+    if (!is.null(input$pipeline_state_json)) {
+      updateTextAreaInput(session, "pipeline_state_json", value = json_txt)
+    }
+  })
+
+  observeEvent(input$pipeline_state_upload, {
+    file <- input$pipeline_state_upload
+    req(file$datapath)
+    state <- tryCatch(jsonlite::fromJSON(file$datapath, simplifyVector = FALSE), error = function(e) {
+      showNotification(paste("Unable to import pipeline:", e$message), type = "error")
+      NULL
+    })
+    if (!is.null(state)) import_pipeline_state(state)
+  })
+
   # Data preview -----------------------------------------------------------
   output$data_preview <- renderDT({
     datatable(data_transformed(), filter = "top", options = list(scrollX = TRUE, pageLength = 10))
@@ -878,20 +1422,32 @@ server <- function(input, output, session) {
       theme_minimal()
   })
 
-  output$data_dictionary <- renderDT({
+  data_dictionary_tbl <- reactive({
     df <- data_raw()
     preview_vals <- map_chr(df, function(x) {
       vals <- unique(x[!is.na(x)])
       paste(head(vals, 3), collapse = ", ")
     })
-    dict <- tibble(
+    tibble(
       column = names(df),
       type = map_chr(df, friendly_type),
-      pct_missing = sprintf("%.1f%%", map_dbl(df, ~ mean(is.na(.)) * 100)),
+      pct_missing = map_dbl(df, ~ mean(is.na(.)) * 100),
       examples = preview_vals
     )
-    datatable(dict, options = list(pageLength = 10))
   })
+
+  output$data_dictionary <- renderDT({
+    dict <- data_dictionary_tbl()
+    datatable(dict %>% mutate(pct_missing = sprintf("%.1f%%", pct_missing)), options = list(pageLength = 10))
+  })
+
+  output$download_dictionary <- downloadHandler(
+    filename = function() paste0("data_dictionary_", Sys.Date(), ".csv"),
+    content = function(file) {
+      dict <- data_dictionary_tbl()
+      write.csv(dict, file, row.names = FALSE)
+    }
+  )
 
   output$download_report <- downloadHandler(
     filename = function() paste0("eda_report_", Sys.Date(), ".html"),
@@ -915,10 +1471,23 @@ server <- function(input, output, session) {
   )
 
   # Distributions tab ------------------------------------------------------
+  dist_data <- reactive({
+    source <- input$dist_data_source %||% "transformed"
+    resolve_dataset(source)
+  })
+
   output$dist_controls <- renderUI({
-    df <- data_transformed()
+    df <- dist_data()
     req(ncol(df) > 0)
-    selectInput("dist_var", "Variable", choices = names(df))
+    choices <- dataset_source_choices()
+    selected_source <- input$dist_data_source
+    if (is.null(selected_source) || !selected_source %in% choices) {
+      selected_source <- "transformed"
+    }
+    tagList(
+      selectInput("dist_data_source", "Use dataset", choices = choices, selected = selected_source),
+      selectInput("dist_var", "Variable", choices = names(df))
+    )
   })
 
   output$dist_outputs <- renderUI({
@@ -926,7 +1495,7 @@ server <- function(input, output, session) {
     if (is_demo()) {
       wellPanel("Upload your own data to view full distribution diagnostics.")
     } else {
-      df <- data_transformed()
+      df <- dist_data()
       var <- input$dist_var
       if (is.numeric(df[[var]])) {
         tagList(
@@ -946,7 +1515,7 @@ server <- function(input, output, session) {
 
   output$hist_plot <- renderPlot({
     req(input$dist_var)
-    df <- data_transformed()
+    df <- dist_data()
     var <- input$dist_var
     req(is.numeric(df[[var]]))
     ggplot(df, aes(x = .data[[var]])) +
@@ -958,7 +1527,7 @@ server <- function(input, output, session) {
 
   output$box_plot <- renderPlot({
     req(input$dist_var)
-    df <- data_transformed()
+    df <- dist_data()
     var <- input$dist_var
     req(is.numeric(df[[var]]))
     ggplot(df, aes(y = .data[[var]])) +
@@ -969,7 +1538,7 @@ server <- function(input, output, session) {
 
   output$numeric_stats <- renderTable({
     req(input$dist_var)
-    df <- data_transformed()
+    df <- dist_data()
     var <- input$dist_var
     req(is.numeric(df[[var]]))
     x <- df[[var]]
@@ -984,7 +1553,7 @@ server <- function(input, output, session) {
 
   output$bar_plot <- renderPlot({
     req(input$dist_var)
-    df <- data_transformed()
+    df <- dist_data()
     var <- input$dist_var
     req(!is.numeric(df[[var]]))
     top_k <- input$top_k %||% 10
@@ -1006,11 +1575,23 @@ server <- function(input, output, session) {
   })
 
   # Relationships tab ------------------------------------------------------
+  rel_data <- reactive({
+    source <- input$rel_data_source %||% "transformed"
+    resolve_dataset(source)
+  })
+
   output$rel_controls <- renderUI({
-    df <- data_transformed()
+    df <- rel_data()
     numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
     factor_cols <- names(df)[vapply(df, function(x) is.character(x) || is.factor(x), logical(1))]
+    if (length(numeric_cols) == 0) {
+      return(wellPanel("Select a dataset with numeric columns."))
+    }
+    choices <- dataset_source_choices()
+    selected_source <- input$rel_data_source
+    if (is.null(selected_source) || !selected_source %in% choices) selected_source <- "transformed"
     tagList(
+      selectInput("rel_data_source", "Use dataset", choices = choices, selected = selected_source),
       fluidRow(
         column(4, selectInput("rel_x", "X", choices = numeric_cols)),
         column(4, selectInput("rel_y", "Y", choices = numeric_cols, selected = numeric_cols[min(2, length(numeric_cols))])),
@@ -1039,7 +1620,7 @@ server <- function(input, output, session) {
 
   output$scatter_plot <- renderPlot({
     req(input$rel_x, input$rel_y)
-    df <- data_transformed()
+    df <- rel_data()
     req(is.numeric(df[[input$rel_x]]), is.numeric(df[[input$rel_y]]))
     plt <- ggplot(df, aes(x = .data[[input$rel_x]], y = .data[[input$rel_y]])) +
       geom_point(alpha = 0.7)
@@ -1053,7 +1634,7 @@ server <- function(input, output, session) {
 
   output$scatter_stats <- renderText({
     req(input$rel_x, input$rel_y)
-    df <- data_transformed()
+    df <- rel_data()
     method <- tolower(input$rel_corr_method %||% "pearson")
     if (nrow(df) < 3) return("Insufficient data")
     ctest <- tryCatch(cor.test(df[[input$rel_x]], df[[input$rel_y]], method = method, use = "pairwise.complete.obs"), error = function(e) NULL)
@@ -1063,7 +1644,7 @@ server <- function(input, output, session) {
 
   output$group_summary_plot <- renderPlot({
     req(input$rel_group_num, input$rel_group_cat)
-    df <- data_transformed()
+    df <- rel_data()
     req(is.numeric(df[[input$rel_group_num]]))
     req(input$rel_group_cat %in% names(df))
     summary_df <- df %>% group_by(.data[[input$rel_group_cat]]) %>% summarise(
@@ -1083,10 +1664,22 @@ server <- function(input, output, session) {
   })
 
   # Correlation tab -------------------------------------------------------
+  corr_data <- reactive({
+    source <- input$corr_data_source %||% "transformed"
+    resolve_dataset(source)
+  })
+
   output$corr_controls <- renderUI({
-    df <- data_transformed()
+    df <- corr_data()
     numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+    if (length(numeric_cols) < 2) {
+      return(wellPanel("Select a dataset with at least two numeric columns."))
+    }
+    choices <- dataset_source_choices()
+    selected_source <- input$corr_data_source
+    if (is.null(selected_source) || !selected_source %in% choices) selected_source <- "transformed"
     tagList(
+      selectInput("corr_data_source", "Use dataset", choices = choices, selected = selected_source),
       selectInput("corr_method", "Method", choices = corr_methods),
       selectizeInput("corr_cols", "Columns", choices = numeric_cols, multiple = TRUE, selected = numeric_cols)
     )
@@ -1094,7 +1687,7 @@ server <- function(input, output, session) {
 
   corr_matrix <- reactive({
     cols <- input$corr_cols
-    df <- data_transformed()
+    df <- corr_data()
     req(!is.null(cols), length(cols) >= 2)
     mat <- df %>% select(all_of(cols)) %>% mutate(across(everything(), as.numeric))
     cor(mat, use = "pairwise.complete.obs", method = input$corr_method %||% "pearson")
@@ -1123,6 +1716,257 @@ server <- function(input, output, session) {
       theme_minimal()
   })
 
+  # --- Target EDA tab ----------------------------------------------------
+  target_data <- reactive({
+    source <- input$target_data_source %||% "transformed"
+    resolve_dataset(source)
+  })
+
+  observeEvent(input$target_column, {
+    df <- target_data()
+    col <- input$target_column
+    if (is.null(col) || is.null(df) || !col %in% names(df)) return()
+    auto_type <- if (is.numeric(df[[col]])) "numeric" else "categorical"
+    updateSelectInput(session, "target_type", selected = auto_type)
+  }, ignoreNULL = TRUE)
+
+  output$target_controls <- renderUI({
+    df <- target_data()
+    if (is.null(df) || ncol(df) == 0) {
+      return(wellPanel("Select a dataset with columns to analyse."))
+    }
+    choices <- dataset_source_choices()
+    selected_source <- input$target_data_source
+    if (is.null(selected_source) || !selected_source %in% choices) selected_source <- "transformed"
+    cols <- names(df)
+    selected_target <- input$target_column
+    if (is.null(selected_target) || !selected_target %in% cols) selected_target <- cols[1]
+    auto_type <- if (is.numeric(df[[selected_target]])) "numeric" else "categorical"
+    selected_type <- input$target_type
+    if (is.null(selected_type) || !selected_type %in% c("numeric", "categorical")) selected_type <- auto_type
+    cat_cols <- names(df)[vapply(df, function(x) is.character(x) || is.factor(x), logical(1))]
+    num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+    tagList(
+      selectInput("target_data_source", "Use dataset", choices = choices, selected = selected_source),
+      selectInput("target_column", "Target column", choices = cols, selected = selected_target),
+      selectInput("target_type", "Target type", choices = c("Numeric" = "numeric", "Categorical" = "categorical"), selected = selected_type),
+      helpText(sprintf("Auto-detected: %s", str_to_title(auto_type))),
+      conditionalPanel(
+        condition = "input.target_type == 'numeric'",
+        selectInput("target_cat_for_plot", "Categorical for grouping", choices = c("None", cat_cols))
+      ),
+      conditionalPanel(
+        condition = "input.target_type == 'categorical'",
+        selectizeInput("target_numeric_cols", "Numeric columns", choices = setdiff(num_cols, selected_target), multiple = TRUE)
+      )
+    )
+  })
+
+  target_correlation_tbl <- reactive({
+    df <- target_data()
+    target <- input$target_column
+    type <- input$target_type %||% "numeric"
+    if (is.null(df) || is.null(target) || !target %in% names(df) || type != "numeric") return(tibble())
+    if (!is.numeric(df[[target]])) return(tibble())
+    num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+    others <- setdiff(num_cols, target)
+    if (length(others) == 0) return(tibble())
+    tibble(
+      feature = others,
+      correlation = map_dbl(others, ~ suppressWarnings(cor(df[[target]], df[[.x]], use = "pairwise.complete.obs")))
+    ) %>% filter(!is.na(correlation)) %>% arrange(desc(abs(correlation)))
+  })
+
+  output$target_outputs <- renderUI({
+    df <- target_data()
+    target <- input$target_column
+    type <- input$target_type %||% "numeric"
+    if (is.null(df) || is.null(target) || !target %in% names(df)) {
+      return(wellPanel("Select a valid target column."))
+    }
+    if (type == "numeric" && !is.numeric(df[[target]])) {
+      return(wellPanel("Target is not numeric; switch to categorical analysis."))
+    }
+    if (type == "categorical" && is.numeric(df[[target]])) {
+      return(wellPanel("Target is numeric; switch to numeric analysis."))
+    }
+    if (type == "numeric") {
+      tagList(
+        h4("Correlation with numeric features"),
+        tableOutput("target_correlation"),
+        h4("Distribution by category"),
+        plotOutput("target_numeric_plot")
+      )
+    } else {
+      tagList(
+        h4("Class frequencies"),
+        plotOutput("target_class_plot"),
+        uiOutput("target_numeric_plots")
+      )
+    }
+  })
+
+  output$target_correlation <- renderTable({
+    tbl <- target_correlation_tbl()
+    if (nrow(tbl) == 0) return(tibble(message = "No numeric correlations available."))
+    tbl
+  })
+
+  output$target_numeric_plot <- renderPlot({
+    df <- target_data()
+    target <- req(input$target_column)
+    req(is.numeric(df[[target]]))
+    cat_col <- input$target_cat_for_plot
+    if (is.null(cat_col) || cat_col == "None" || !cat_col %in% names(df)) {
+      ggplot(df, aes(x = "", y = .data[[target]])) +
+        geom_violin(fill = "#A0CBE8", alpha = 0.6) +
+        geom_boxplot(width = 0.1, outlier.alpha = 0.3) +
+        labs(x = NULL, y = target, title = paste("Distribution of", target)) +
+        theme_minimal()
+    } else {
+      ggplot(df, aes(x = .data[[cat_col]], y = .data[[target]])) +
+        geom_violin(fill = "#A0CBE8", alpha = 0.6, na.rm = TRUE) +
+        geom_boxplot(width = 0.2, outlier.alpha = 0.3, na.rm = TRUE) +
+        labs(x = cat_col, y = target, title = paste(target, "by", cat_col)) +
+        theme_minimal()
+    }
+  })
+
+  output$target_class_plot <- renderPlot({
+    df <- target_data()
+    target <- req(input$target_column)
+    counts <- df %>% count(.data[[target]], name = "n") %>% mutate(prop = n / sum(n))
+    ggplot(counts, aes(x = reorder(as.character(.data[[target]]), n), y = n, fill = n)) +
+      geom_col(show.legend = FALSE) +
+      coord_flip() +
+      labs(x = target, y = "Count", title = paste("Class distribution for", target)) +
+      theme_minimal()
+  })
+
+  output$target_numeric_plots <- renderUI({
+    df <- target_data()
+    target <- input$target_column
+    req(!is.null(df), !is.null(target), target %in% names(df))
+    cols <- input$target_numeric_cols
+    if (is.null(cols) || length(cols) == 0) {
+      return(wellPanel("Select numeric columns to compare means."))
+    }
+    tagList(lapply(seq_along(cols), function(i) {
+      col <- cols[[i]]
+      output_id <- paste0("target_num_plot_", i)
+      local({
+        col_local <- col
+        output[[output_id]] <- renderPlot({
+          df <- target_data()
+          req(col_local %in% names(df), input$target_column %in% names(df))
+          req(!is.numeric(df[[input$target_column]]))
+          summary_df <- df %>% group_by(.data[[input$target_column]]) %>% summarise(
+            mean = mean(.data[[col_local]], na.rm = TRUE),
+            sd = sd(.data[[col_local]], na.rm = TRUE),
+            n = dplyr::n(),
+            se = sd / sqrt(pmax(n, 1)),
+            ci_low = mean - qt(0.975, pmax(n - 1, 1)) * se,
+            ci_high = mean + qt(0.975, pmax(n - 1, 1)) * se,
+            .groups = 'drop'
+          )
+          ggplot(summary_df, aes(x = .data[[input$target_column]], y = mean)) +
+            geom_col(fill = "#4E79A7", alpha = 0.8) +
+            geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.2) +
+            labs(x = input$target_column, y = paste("Mean", col_local), title = paste("Mean", col_local, "by", input$target_column)) +
+            theme_minimal()
+        })
+      })
+      plotOutput(output_id, height = "300px")
+    }))
+  })
+
+  # --- Time Series tab ---------------------------------------------------
+  time_series_data <- reactive({
+    source <- input$time_data_source %||% "transformed"
+    resolve_dataset(source)
+  })
+
+  output$time_series_controls <- renderUI({
+    df <- time_series_data()
+    if (is.null(df) || ncol(df) == 0) {
+      return(wellPanel("Select a dataset to begin."))
+    }
+    date_cols <- names(df)[vapply(df, function(x) inherits(x, c("Date", "POSIXct", "POSIXt")), logical(1))]
+    if (length(date_cols) == 0) {
+      return(tagList(
+        selectInput("time_data_source", "Use dataset", choices = dataset_source_choices(), selected = input$time_data_source %||% "transformed"),
+        wellPanel("No date/datetime columns detected.")
+      ))
+    }
+    numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+    choices <- dataset_source_choices()
+    selected_source <- input$time_data_source
+    if (is.null(selected_source) || !selected_source %in% choices) selected_source <- "transformed"
+    if (length(numeric_cols) == 0) {
+      return(tagList(
+        selectInput("time_data_source", "Use dataset", choices = choices, selected = selected_source),
+        selectInput("time_date_col", "Date column", choices = date_cols, selected = input$time_date_col %||% date_cols[1]),
+        wellPanel("No numeric measures available.")
+      ))
+    }
+    tagList(
+      selectInput("time_data_source", "Use dataset", choices = choices, selected = selected_source),
+      selectInput("time_date_col", "Date column", choices = date_cols, selected = input$time_date_col %||% date_cols[1]),
+      selectInput("time_measure_col", "Numeric measure", choices = numeric_cols, selected = input$time_measure_col %||% numeric_cols[1]),
+      selectInput("time_period", "Aggregation", choices = c("Day" = "day", "Week" = "week", "Month" = "month", "Quarter" = "quarter", "Year" = "year"), selected = input$time_period %||% "month")
+    )
+  })
+
+  time_series_agg <- reactive({
+    df <- time_series_data()
+    date_col <- input$time_date_col
+    value_col <- input$time_measure_col
+    period <- input$time_period %||% "month"
+    if (is.null(df) || is.null(date_col) || is.null(value_col)) return(tibble())
+    if (!date_col %in% names(df) || !value_col %in% names(df)) return(tibble())
+    if (!is.numeric(df[[value_col]])) return(tibble())
+    dt <- df[[date_col]]
+    dt_posix <- suppressWarnings(as.POSIXct(dt, tz = "UTC"))
+    if (all(is.na(dt_posix))) {
+      dt_posix <- as.POSIXct(as.Date(dt), tz = "UTC")
+    }
+    floored <- lubridate::floor_date(dt_posix, unit = period)
+    agg <- tibble(.period = floored, value = df[[value_col]]) %>%
+      group_by(.period) %>%
+      summarise(measure = sum(value, na.rm = TRUE), .groups = "drop") %>%
+      arrange(.period)
+    if (nrow(agg) == 0) return(tibble())
+    seq_full <- seq(min(agg$.period), max(agg$.period), by = period)
+    tibble(.period = seq_full) %>% left_join(agg, by = ".period") %>% mutate(period_date = as.Date(.period))
+  })
+
+  output$time_series_outputs <- renderUI({
+    agg <- time_series_agg()
+    if (nrow(agg) == 0) {
+      return(wellPanel("Configure the controls to produce a time series."))
+    }
+    tagList(
+      plotOutput("time_series_plot"),
+      tableOutput("time_series_table")
+    )
+  })
+
+  output$time_series_plot <- renderPlot({
+    agg <- time_series_agg()
+    validate(need(nrow(agg) > 0, "No time series data to plot."))
+    ggplot(agg, aes(x = period_date, y = measure)) +
+      geom_line(color = "#4E79A7", linewidth = 1, na.rm = FALSE) +
+      geom_point(color = "#F28E2B", na.rm = TRUE) +
+      labs(x = NULL, y = input$time_measure_col %||% "Value", title = paste("Aggregated", input$time_measure_col %||% "value", "by", str_to_title(input$time_period %||% "month"))) +
+      theme_minimal()
+  })
+
+  output$time_series_table <- renderTable({
+    agg <- time_series_agg()
+    if (nrow(agg) == 0) return(tibble())
+    agg %>% select(period = period_date, value = measure)
+  })
+
   output$download_corr_png <- downloadHandler(
     filename = function() paste0("correlation_heatmap_", Sys.Date(), ".png"),
     content = function(file) {
@@ -1145,10 +1989,72 @@ server <- function(input, output, session) {
   )
 
   # Quality tab -----------------------------------------------------------
+  duplicate_rows <- reactive({
+    df <- data_transformed()
+    if (nrow(df) == 0) return(tibble())
+    dup_idx <- duplicated(df) | duplicated(df, fromLast = TRUE)
+    if (!any(dup_idx)) return(tibble())
+    tibble(row = which(dup_idx)) %>% bind_cols(df[dup_idx, , drop = FALSE])
+  })
+
+  duplicates_summary_tbl <- reactive({
+    rows <- duplicate_rows()
+    if (nrow(rows) == 0) return(tibble())
+    rows %>% select(-row) %>% group_by(across(everything())) %>% summarise(count = dplyr::n(), .groups = "drop") %>% arrange(desc(count))
+  })
+
+  near_zero_tbl <- reactive({
+    df <- data_transformed()
+    if (nrow(df) == 0) return(tibble())
+    tibble(column = names(df)) %>% mutate(
+      unique_values = map_int(column, ~ dplyr::n_distinct(df[[.x]], na.rm = TRUE)),
+      rows = nrow(df),
+      ratio = ifelse(rows == 0, 0, unique_values / rows)
+    ) %>% filter(ratio <= 0.01)
+  })
+
+  type_conflicts_tbl <- reactive({
+    df <- data_transformed()
+    tibble(column = names(df)) %>% mutate(
+      detected_type = map_chr(column, ~ friendly_type(df[[.x]])),
+      non_numeric_values = map_int(column, function(col) {
+        vec <- df[[col]]
+        if (is.numeric(vec) || inherits(vec, c("Date", "POSIXct", "POSIXt"))) return(0L)
+        suppressWarnings(num <- as.numeric(as.character(vec)))
+        sum(is.na(num) & !is.na(vec))
+      })
+    ) %>% filter(non_numeric_values > 0)
+  })
+
+  co_missing_tbl <- reactive({
+    df <- data_transformed()
+    if (ncol(df) < 2 || nrow(df) == 0) return(tibble())
+    miss <- is.na(df)
+    combos <- combn(ncol(df), 2, simplify = FALSE)
+    tibble(
+      column_a = map_chr(combos, ~ names(df)[.x[1]]),
+      column_b = map_chr(combos, ~ names(df)[.x[2]]),
+      co_missing = map_int(combos, ~ sum(miss[, .x[1]] & miss[, .x[2]], na.rm = TRUE))
+    ) %>% mutate(pct_rows = ifelse(nrow(df) == 0, 0, co_missing / nrow(df))) %>% arrange(desc(co_missing)) %>% slice_head(n = 10)
+  })
+
+  quality_report_tbl <- reactive({
+    pieces <- list(
+      missingness = missing_summary_tbl(),
+      duplicates = duplicates_summary_tbl(),
+      near_zero = near_zero_tbl(),
+      type_conflicts = type_conflicts_tbl(),
+      co_missingness = co_missing_tbl()
+    )
+    purrr::imap_dfr(pieces, function(tbl, nm) {
+      if (is.null(tbl) || nrow(tbl) == 0) return(tibble())
+      tibble(section = nm) %>% bind_cols(tbl)
+    })
+  })
+
   output$quality_outputs <- renderUI({
     df <- data_transformed()
     num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
-    miss_tbl <- missing_summary_tbl()
     outlier_tbl <- tibble(column = num_cols) %>% mutate(
       q1 = map_dbl(column, ~ quantile(df[[.x]], 0.25, na.rm = TRUE)),
       q3 = map_dbl(column, ~ quantile(df[[.x]], 0.75, na.rm = TRUE)),
@@ -1161,20 +2067,78 @@ server <- function(input, output, session) {
     tagList(
       h4('Missingness'),
       tableOutput('quality_missing'),
+      h5('Top co-missingness pairs'),
+      tableOutput('co_missing_table'),
       if (is_demo()) {
         wellPanel('Upload your data to inspect detailed missingness patterns.')
       } else {
         plotOutput('missing_map')
       },
+      h4('Duplicates'),
+      tableOutput('duplicates_table'),
+      downloadButton('download_duplicates', 'Download duplicates'),
+      h4('Near-zero / constant columns'),
+      tableOutput('near_zero_table'),
+      h4('Type conflicts'),
+      tableOutput('type_conflicts_table'),
       h4('Outliers'),
       tableOutput('quality_outliers'),
-      p('Toggle "Drop Tukey outliers" in the Transform tab to remove them from downstream analysis.')
+      p('Toggle "Drop Tukey outliers" in the Transform tab to remove them from downstream analysis.'),
+      downloadButton('download_quality_report', 'Download quality report')
     )
   })
 
   output$quality_missing <- renderTable({
-    missing_summary_tbl()
+    missing_summary_tbl() %>% mutate(pct_missing = sprintf("%.1f%%", pct_missing))
   })
+
+  output$co_missing_table <- renderTable({
+    tbl <- co_missing_tbl()
+    if (nrow(tbl) == 0) return(tibble(message = 'No co-missingness detected.'))
+    tbl %>% mutate(pct_rows = scales::percent(pct_rows))
+  })
+
+  output$duplicates_table <- renderTable({
+    tbl <- duplicates_summary_tbl()
+    if (nrow(tbl) == 0) return(tibble(message = 'No duplicate rows found.'))
+    tbl
+  })
+
+  output$near_zero_table <- renderTable({
+    tbl <- near_zero_tbl()
+    if (nrow(tbl) == 0) return(tibble(message = 'No near-zero variance columns detected.'))
+    tbl %>% mutate(ratio = scales::percent(ratio))
+  })
+
+  output$type_conflicts_table <- renderTable({
+    tbl <- type_conflicts_tbl()
+    if (nrow(tbl) == 0) return(tibble(message = 'No type conflicts detected.'))
+    tbl
+  })
+
+  output$download_duplicates <- downloadHandler(
+    filename = function() paste0("duplicates_", Sys.Date(), ".csv"),
+    content = function(file) {
+      rows <- duplicate_rows()
+      if (nrow(rows) == 0) {
+        write.csv(tibble(message = "No duplicates"), file, row.names = FALSE)
+      } else {
+        write.csv(rows, file, row.names = FALSE)
+      }
+    }
+  )
+
+  output$download_quality_report <- downloadHandler(
+    filename = function() paste0("quality_report_", Sys.Date(), ".csv"),
+    content = function(file) {
+      report <- quality_report_tbl()
+      if (nrow(report) == 0) {
+        write.csv(tibble(message = "No issues detected."), file, row.names = FALSE)
+      } else {
+        write.csv(report, file, row.names = FALSE)
+      }
+    }
+  )
 
   output$missing_map <- renderPlot({
     req(!is_demo())
