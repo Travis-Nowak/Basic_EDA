@@ -127,11 +127,18 @@ ui <- page_sidebar(
         column(9, plotOutput("missing_bar"))
       ),
       hr(),
+      h4("Model readiness"),
+      uiOutput("model_readiness"),
+      hr(),
       h4("Data dictionary"),
       downloadButton("download_dictionary", "Download data dictionary"),
       DTOutput("data_dictionary"),
       hr(),
       downloadButton("download_report", "Download HTML summary")
+    ),
+    tabPanel(
+      "Insights",
+      uiOutput("insights_ui")
     ),
     tabPanel(
       "Data",
@@ -266,7 +273,21 @@ server <- function(input, output, session) {
   valueBox <- function(title, value) {
     div(class = 'card text-center mb-3', div(class = 'card-body', h5(class = 'card-title', title), h3(class = 'card-text', value)))
   }
-  
+
+  badge <- function(ok, text) {
+    if (ok) {
+      tags$div(
+        style = "color: #155724; background:#d4edda; padding:4px 8px; margin-bottom:4px; border-radius:4px;",
+        paste("✅", text)
+      )
+    } else {
+      tags$div(
+        style = "color: #721c24; background:#f8d7da; padding:4px 8px; margin-bottom:4px; border-radius:4px;",
+        paste("❌", text)
+      )
+    }
+  }
+
   # Update sheet picker when a file is uploaded
   observe({
     if (is_demo()) {
@@ -524,8 +545,46 @@ server <- function(input, output, session) {
       pct_missing = map_dbl(df, ~ mean(is.na(.)) * 100)
     )
   })
-  
+
   output$missing_summary <- renderTable({ missing_summary_tbl() })
+
+  output$model_readiness <- renderUI({
+    df <- data_transformed()
+    if (is.null(df)) {
+      df <- tibble()
+    }
+    if (nrow(df) == 0 || ncol(df) == 0) {
+      overall_miss <- 0
+    } else {
+      overall_miss <- mean(is.na(df)) * 100
+    }
+    miss_tbl <- missing_summary_tbl()
+    has_big_miss <- FALSE
+    if (!is.null(miss_tbl) && nrow(miss_tbl) > 0 && "pct_missing" %in% names(miss_tbl)) {
+      has_big_miss <- any(miss_tbl$pct_missing > 50, na.rm = TRUE)
+    }
+    dups <- duplicate_rows()
+    has_dups <- !is.null(dups) && nrow(dups) > 0
+    has_num <- any(vapply(df, is.numeric, logical(1)))
+
+    tgt_ok <- TRUE
+    if (!is.null(input$target_column) && input$target_column %in% names(df)) {
+      col <- df[[input$target_column]]
+      if (all(is.na(col))) {
+        tgt_ok <- FALSE
+      } else if (!is.numeric(col)) {
+        tgt_ok <- dplyr::n_distinct(col[!is.na(col)]) > 1
+      }
+    }
+
+    tagList(
+      badge(overall_miss <= 20, sprintf("Overall missingness %.1f%% (<=20%%)", overall_miss)),
+      badge(!has_big_miss, "No columns with >50% missing"),
+      badge(!has_dups, "No duplicate rows"),
+      badge(has_num, "At least one numeric column"),
+      badge(tgt_ok, "Target column is usable")
+    )
+  })
   
   # Filter builder UI ------------------------------------------------------
   observeEvent(input$add_filter, {
@@ -2457,7 +2516,96 @@ server <- function(input, output, session) {
       }
     }
   )
-  
+
+  insights <- reactive({
+    insights_list <- list()
+
+    miss_tbl <- missing_summary_tbl()
+    if (!is.null(miss_tbl) && nrow(miss_tbl) > 0) {
+      high_miss <- miss_tbl %>% filter(pct_missing >= 30)
+      if (nrow(high_miss) > 0) {
+        formatted <- sprintf("%s (%.1f%%)", high_miss$column, high_miss$pct_missing)
+        insights_list <- c(insights_list, sprintf("Columns with high missingness (>=30%%): %s", paste(formatted, collapse = ", ")))
+      }
+    }
+
+    if (!isTRUE(is_demo())) {
+      assoc_msg <- tryCatch({
+        mat <- corr_matrix()
+        df_corr <- as.data.frame(as.table(mat))
+        if (!all(c("Var1", "Var2", "Freq") %in% names(df_corr))) {
+          return(NULL)
+        }
+        df_corr <- df_corr %>%
+          filter(as.character(Var1) < as.character(Var2)) %>%
+          filter(!is.na(Freq)) %>%
+          mutate(abs_freq = abs(Freq)) %>%
+          filter(abs_freq >= 0.7) %>%
+          arrange(desc(abs_freq)) %>%
+          slice_head(n = 5)
+        if (nrow(df_corr) == 0) {
+          NULL
+        } else {
+          pairs <- sprintf("%s – %s (%.2f)", df_corr$Var1, df_corr$Var2, df_corr$Freq)
+          sprintf("Strong numeric associations (|r| ≥ 0.7): %s", paste(pairs, collapse = "; "))
+        }
+      }, error = function(e) NULL)
+      if (!is.null(assoc_msg)) {
+        insights_list <- c(insights_list, assoc_msg)
+      }
+    }
+
+    tgt_col <- input$target_column
+    tgt_df <- target_data()
+    if (!is.null(tgt_df) && !is.null(tgt_col) && tgt_col %in% names(tgt_df)) {
+      col <- tgt_df[[tgt_col]]
+      if (is.numeric(col)) {
+        corr_tbl <- target_correlation_tbl()
+        if (!is.null(corr_tbl) && nrow(corr_tbl) > 0) {
+          top_corr <- corr_tbl %>% mutate(abs_corr = abs(correlation)) %>% arrange(desc(abs_corr)) %>% slice_head(n = 5)
+          if (nrow(top_corr) > 0) {
+            formatted <- sprintf("%s (%.2f)", top_corr$feature, top_corr$correlation)
+            insights_list <- c(insights_list, sprintf("Top drivers of %s (by correlation): %s", tgt_col, paste(formatted, collapse = "; ")))
+          }
+        }
+      } else {
+        col_no_na <- col[!is.na(col)]
+        if (length(col_no_na) > 0) {
+          freq_tbl <- prop.table(table(col_no_na))
+          if (length(freq_tbl) > 0) {
+            top_class <- freq_tbl[order(freq_tbl, decreasing = TRUE)][1]
+            top_name <- names(top_class)
+            if (!is.null(top_name) && top_class >= 0.5) {
+              insights_list <- c(insights_list, sprintf("Target '%s' is imbalanced: %s = %.0f%%", tgt_col, top_name, top_class * 100))
+            }
+          }
+        }
+      }
+    }
+
+    nz_tbl <- near_zero_tbl()
+    if (!is.null(nz_tbl) && nrow(nz_tbl) > 0) {
+      cols <- nz_tbl$column
+      if (length(cols) > 0) {
+        insights_list <- c(insights_list, sprintf("Columns with near-zero variance: %s", paste(cols, collapse = ", ")))
+      }
+    }
+
+    if (length(insights_list) == 0) {
+      list("No notable insights detected. Try uploading more data or lowering thresholds.")
+    } else {
+      insights_list
+    }
+  })
+
+  output$insights_ui <- renderUI({
+    ins <- insights()
+    tagList(
+      h4("Auto-generated insights"),
+      tags$ul(lapply(ins, function(x) tags$li(x)))
+    )
+  })
+
   output$missing_map <- renderPlot({
     req(!is_demo())
     df <- data_for_profile() %>% head(100)
