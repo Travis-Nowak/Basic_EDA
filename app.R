@@ -1908,6 +1908,8 @@ server <- function(input, output, session) {
       ))
     }
     numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+    # categorical = not date/datetime and not numeric
+    cat_cols <- setdiff(names(df), c(date_cols, numeric_cols))
     choices <- dataset_source_choices()
     selected_source <- input$time_data_source
     if (is.null(selected_source) || !selected_source %in% choices) selected_source <- "transformed"
@@ -1922,32 +1924,53 @@ server <- function(input, output, session) {
       selectInput("time_data_source", "Use dataset", choices = choices, selected = selected_source),
       selectInput("time_date_col", "Date column", choices = date_cols, selected = input$time_date_col %||% date_cols[1]),
       selectInput("time_measure_col", "Numeric measure", choices = numeric_cols, selected = input$time_measure_col %||% numeric_cols[1]),
-      selectInput("time_period", "Aggregation", choices = c("Day" = "day", "Week" = "week", "Month" = "month", "Quarter" = "quarter", "Year" = "year"), selected = input$time_period %||% "month")
+      selectInput("time_period", "Aggregation", choices = c("Day" = "day", "Week" = "week", "Month" = "month", "Quarter" = "quarter", "Year" = "year"), selected = input$time_period %||% "month"),
+      selectInput("time_group_col", "Group by (optional)", choices = c("None", cat_cols), selected = input$time_group_col %||% "None")
     )
   })
+  
   
   time_series_agg <- reactive({
     df <- time_series_data()
     date_col <- input$time_date_col
     value_col <- input$time_measure_col
     period <- input$time_period %||% "month"
+    group_col <- input$time_group_col %||% "None"
+    
     if (is.null(df) || is.null(date_col) || is.null(value_col)) return(tibble())
     if (!date_col %in% names(df) || !value_col %in% names(df)) return(tibble())
     if (!is.numeric(df[[value_col]])) return(tibble())
+    
     dt <- df[[date_col]]
     dt_posix <- suppressWarnings(as.POSIXct(dt, tz = "UTC"))
     if (all(is.na(dt_posix))) {
       dt_posix <- as.POSIXct(as.Date(dt), tz = "UTC")
     }
     floored <- lubridate::floor_date(dt_posix, unit = period)
-    agg <- tibble(.period = floored, value = df[[value_col]]) %>%
-      group_by(.period) %>%
-      summarise(measure = sum(value, na.rm = TRUE), .groups = "drop") %>%
-      arrange(.period)
+    
+    base_tbl <- tibble(.period = floored, value = df[[value_col]])
+    
+    # if grouping is chosen and exists, keep it
+    if (!identical(group_col, "None") && group_col %in% names(df)) {
+      base_tbl[[group_col]] <- df[[group_col]]
+      agg <- base_tbl %>%
+        group_by(.period, .data[[group_col]]) %>%
+        summarise(measure = mean(value, na.rm = TRUE), .groups = "drop") %>%
+        arrange(.period, .data[[group_col]])
+    } else {
+      agg <- base_tbl %>%
+        group_by(.period) %>%
+        summarise(measure = mean(value, na.rm = TRUE), .groups = "drop") %>%
+        arrange(.period)
+    }
+    
     if (nrow(agg) == 0) return(tibble())
-    seq_full <- seq(min(agg$.period), max(agg$.period), by = period)
-    tibble(.period = seq_full) %>% left_join(agg, by = ".period") %>% mutate(period_date = as.Date(.period))
+    
+    # we still attach a date column for plotting
+    agg <- agg %>% mutate(period_date = as.Date(.period))
+    agg
   })
+  
   
   output$time_series_outputs <- renderUI({
     agg <- time_series_agg()
@@ -1963,18 +1986,50 @@ server <- function(input, output, session) {
   output$time_series_plot <- renderPlot({
     agg <- time_series_agg()
     validate(need(nrow(agg) > 0, "No time series data to plot."))
-    ggplot(agg, aes(x = period_date, y = measure)) +
-      geom_line(color = "#4E79A7", linewidth = 1, na.rm = FALSE) +
-      geom_point(color = "#F28E2B", na.rm = TRUE) +
-      labs(x = NULL, y = input$time_measure_col %||% "Value", title = paste("Aggregated", input$time_measure_col %||% "value", "by", str_to_title(input$time_period %||% "month"))) +
-      theme_minimal()
+    group_col <- input$time_group_col %||% "None"
+    
+    if (!identical(group_col, "None") && group_col %in% names(agg)) {
+      ggplot(agg, aes(x = period_date, y = measure, color = .data[[group_col]])) +
+        geom_line(linewidth = 1, na.rm = FALSE) +
+        geom_point(na.rm = TRUE) +
+        labs(
+          x = NULL,
+          y = input$time_measure_col %||% "Value",
+          color = group_col,
+          title = paste("Aggregated", input$time_measure_col %||% "value", "by", stringr::str_to_title(input$time_period %||% "month"))
+        ) +
+        theme_minimal()
+    } else {
+      ggplot(agg, aes(x = period_date, y = measure)) +
+        geom_line(color = "#4E79A7", linewidth = 1, na.rm = FALSE) +
+        geom_point(color = "#F28E2B", na.rm = TRUE) +
+        labs(
+          x = NULL,
+          y = input$time_measure_col %||% "Value",
+          title = paste("Aggregated", input$time_measure_col %||% "value", "by", stringr::str_to_title(input$time_period %||% "month"))
+        ) +
+        theme_minimal()
+    }
   })
+  
   
   output$time_series_table <- renderTable({
     agg <- time_series_agg()
     if (nrow(agg) == 0) return(tibble())
-    agg %>% select(period = period_date, value = measure)
-  }, digits = NULL)
+    
+    # turn the Date into a nice string so the table doesn't show negatives
+    agg <- agg %>% mutate(period = format(period_date, "%Y-%m-%d"))
+    
+    if (!is.null(input$time_group_col) &&
+        input$time_group_col != "None" &&
+        input$time_group_col %in% names(agg)) {
+      agg %>% select(period, group = !!rlang::sym(input$time_group_col), value = measure)
+    } else {
+      agg %>% select(period, value = measure)
+    }
+  })
+  
+  
   
   output$download_corr_png <- downloadHandler(
     filename = function() paste0("correlation_heatmap_", Sys.Date(), ".png"),
